@@ -13,8 +13,7 @@ import { bytesToBase64, stringToBase64 } from '@/lib/base64';
 import { useTokens } from '@/theme';
 
 import { Joystick, type JoystickDirection } from './Joystick';
-
-export type Modifier = 'ctrl' | 'shift' | 'alt' | 'meta';
+import { type Modifier, transformBase64WithModifier } from './terminalModifiers';
 
 export const KEY_BAR_HEIGHT = 64;
 
@@ -217,36 +216,9 @@ function JoystickDock({
 export function transformWithModifiers(base64: string): string {
   const { active, set } = useModifierStore.getState();
   if (!active) return base64;
-
-  let bytes: Uint8Array;
-  try {
-    const bin = globalThis.atob(base64);
-    bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  } catch {
-    return base64;
-  }
-  if (bytes.length === 0) return base64;
-
-  const ch = bytes[0]!;
-  let result = bytes;
-
-  if (active === 'ctrl') {
-    let mapped: number | null = null;
-    if (ch >= 0x40 && ch <= 0x5f) mapped = ch - 0x40;
-    else if (ch >= 0x60 && ch <= 0x7e) mapped = ch - 0x60;
-    else if (ch === 0x20) mapped = 0x00;
-    else if (ch === 0x3f) mapped = 0x7f;
-    if (mapped !== null) result = new Uint8Array([mapped]);
-  } else if (active === 'alt' || active === 'meta') {
-    const prefixed = new Uint8Array(result.length + 1);
-    prefixed[0] = 0x1b;
-    prefixed.set(result, 1);
-    result = prefixed;
-  }
-
+  const result = transformBase64WithModifier(base64, active);
   set(null);
-  return bytesToBase64(result);
+  return result;
 }
 
 function GlassKeyButton({

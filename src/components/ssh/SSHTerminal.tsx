@@ -21,7 +21,6 @@ import {
 import Animated, { useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { bytesToBase64, stringToBase64 } from '@/lib/base64';
 import {
   getNerdFont,
   loadNerdFont,
@@ -58,17 +57,12 @@ import {
   type TerminalWebViewHandle,
   TerminalWebView,
 } from '../terminal/TerminalWebView';
-import { TerminalInput } from '../terminal/TerminalInputCapture';
-import type { TerminalInputHandle } from '../terminal/TerminalInputCapture.types';
 import { scheduleTerminalInputFocus } from '../terminal/terminalFocus';
-import { buildTerminalInputDiff } from '../terminal/terminalInput';
 import { useSSHHostKeyPrompt } from './useSSHHostKeyPrompt';
 
 type Props = {
   connection: SSHConnection;
 };
-
-const INPUT_SENTINEL = '​';
 
 export function SSHTerminal(props: Props) {
   const tokens = useTokens();
@@ -121,11 +115,8 @@ function SSHSessionTerminal({
 }: Props & { nerdFont: NerdFontBase64 | null }) {
   const tokens = useTokens();
   const webRef = useRef<TerminalWebViewHandle>(null);
-  const inputRef = useRef<TerminalInputHandle>(null);
   const sessionIdRef = useRef<string | null>(null);
   const dimensionsRef = useRef<TerminalDimensions | null>(null);
-  const lastSentRef = useRef('');
-  const [inputValue, setInputValue] = useState(INPUT_SENTINEL);
   const [focused, setFocused] = useState(false);
   const [hasDimensions, setHasDimensions] = useState(false);
   const [ready, setReady] = useState(false);
@@ -282,7 +273,7 @@ function SSHSessionTerminal({
 
   useEffect(() => {
     if (!autoFocusTerminal || session?.state !== 'connected') return;
-    return scheduleTerminalInputFocus(inputRef.current);
+    return scheduleTerminalInputFocus(webRef.current);
   }, [autoFocusTerminal, connection.id, session?.state]);
 
   const handleDimensions = useCallback((next: TerminalDimensions) => {
@@ -318,53 +309,6 @@ function SSHSessionTerminal({
     },
     [sendBase64],
   );
-
-  const sendInputDiff = useCallback(
-    (next: string) => {
-      const previous = lastSentRef.current;
-      const output = buildTerminalInputDiff(previous, next);
-      lastSentRef.current = next;
-      if (output) {
-        sendBase64(
-          transformWithModifiers(stringToBase64(output)),
-        );
-      }
-    },
-    [sendBase64],
-  );
-
-  const handleInputChange = useCallback(
-    (text: string) => {
-      const sentinelIndex = text.lastIndexOf(INPUT_SENTINEL);
-      if (sentinelIndex === -1) {
-        sendBase64(bytesToBase64(new Uint8Array([0x7f])));
-        lastSentRef.current = '';
-        setInputValue(INPUT_SENTINEL);
-        return;
-      }
-
-      const body = text.slice(sentinelIndex + INPUT_SENTINEL.length);
-      const newlineIndex = body.indexOf('\n');
-      if (newlineIndex === -1) {
-        setInputValue(INPUT_SENTINEL + body);
-        sendInputDiff(body);
-        return;
-      }
-
-      sendInputDiff(body.slice(0, newlineIndex));
-      sendBase64(stringToBase64('\r'));
-      lastSentRef.current = '';
-      setInputValue(INPUT_SENTINEL);
-    },
-    [sendBase64, sendInputDiff],
-  );
-
-  const handleInputBlur = useCallback(() => {
-    setFocused(false);
-    lastSentRef.current = '';
-    setInputValue(INPUT_SENTINEL);
-  }, []);
-  const handleInputFocus = useCallback(() => setFocused(true), []);
 
   const insets = useSafeAreaInsets();
   const { height } = useReanimatedKeyboardAnimation();
@@ -459,10 +403,10 @@ function SSHSessionTerminal({
   const handleTap = useCallback(() => {
     if (keyboardVisibleRef.current) {
       Keyboard.dismiss();
-      inputRef.current?.blur();
+      webRef.current?.blur();
       return;
     }
-    inputRef.current?.focus();
+    webRef.current?.focus();
   }, []);
 
   const state = session?.state ?? 'idle';
@@ -495,6 +439,7 @@ function SSHSessionTerminal({
             onData={handleData}
             onFollowingBottomChange={setIsFollowingBottom}
             onTap={handleTap}
+            onFocusChange={setFocused}
             onError={(message) => {
               console.log('[ssh-terminal] ' + message);
             }}
@@ -521,15 +466,6 @@ function SSHSessionTerminal({
               style={jumpToBottomSlideStyle}
             />
           ) : null}
-
-          <TerminalInput
-            ref={inputRef}
-            value={inputValue}
-            onChangeText={handleInputChange}
-            onFocus={handleInputFocus}
-            onBlur={handleInputBlur}
-            onHardwareInput={sendBase64}
-          />
 
           {connecting ? (
             <View

@@ -9,7 +9,6 @@ import type { GestureType } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { bytesToBase64, stringToBase64 } from '@/lib/base64';
 import { getNerdFont, loadNerdFont, type NerdFontBase64 } from '@/lib/nerdFont';
 import {
   recordDimensions,
@@ -33,10 +32,7 @@ import {
   type TerminalScroll,
   type TerminalWebViewHandle,
 } from './TerminalWebView';
-import { TerminalInput } from './TerminalInputCapture';
-import type { TerminalInputHandle } from './TerminalInputCapture.types';
 import { scheduleTerminalInputFocus } from './terminalFocus';
-import { buildTerminalInputDiff } from './terminalInput';
 
 type Props = {
   paneId: string;
@@ -44,8 +40,6 @@ type Props = {
   onNewTerminal?: () => void;
   onSelectTabShortcut?: (digit: number) => void;
 };
-
-const INPUT_SENTINEL = '​';
 
 export function TerminalView(props: Props) {
   const tokens = useTokens();
@@ -92,9 +86,6 @@ function TerminalSessionView({
 }: Props & { nerdFont: NerdFontBase64 | null }) {
   const tokens = useTokens();
   const webRef = useRef<TerminalWebViewHandle>(null);
-  const inputRef = useRef<TerminalInputHandle>(null);
-  const lastSentRef = useRef('');
-  const [inputValue, setInputValue] = useState(INPUT_SENTINEL);
 
   const lastTheme = useDevicesStore((s) => s.lastAppliedTheme);
   const activePairing = useDevicesStore((s) => {
@@ -151,20 +142,14 @@ function TerminalSessionView({
   const inputReady =
     connectionPhase === 'connected' && sessionForUs?.kind === 'streaming' && terminalPresented;
 
-  const resetInputCapture = useCallback(() => {
-    lastSentRef.current = '';
-    setInputValue(INPUT_SENTINEL);
-  }, []);
-
   useEffect(() => {
-    resetInputCapture();
     if (!inputReady) {
       setFocused(false);
       return;
     }
     if (!autoFocusTerminal) return;
-    return scheduleTerminalInputFocus(inputRef.current);
-  }, [paneId, autoFocusTerminal, inputReady, resetInputCapture]);
+    return scheduleTerminalInputFocus(webRef.current);
+  }, [paneId, autoFocusTerminal, inputReady]);
 
   const onResume = () => {
     if (!dimensions) return;
@@ -188,56 +173,6 @@ function TerminalSessionView({
     if (!inputReady) return;
     sendTerminalInput(paneId, base64);
   };
-
-  const sendInputDiff = useCallback(
-    (next: string) => {
-      const prev = lastSentRef.current;
-      const out = buildTerminalInputDiff(prev, next);
-      if (!out) {
-        lastSentRef.current = next;
-        return true;
-      }
-      const sent = sendTerminalInput(paneId, transformWithModifiers(stringToBase64(out)));
-      if (sent) lastSentRef.current = next;
-      return sent;
-    },
-    [paneId],
-  );
-
-  const handleInputChange = useCallback(
-    (text: string) => {
-      if (!inputReady) {
-        resetInputCapture();
-        return;
-      }
-      const sentinelIdx = text.lastIndexOf(INPUT_SENTINEL);
-      if (sentinelIdx === -1) {
-        sendTerminalInput(paneId, bytesToBase64(new Uint8Array([0x7f])));
-        resetInputCapture();
-        return;
-      }
-      const body = text.slice(sentinelIdx + INPUT_SENTINEL.length);
-      const newlineIdx = body.indexOf('\n');
-      if (newlineIdx === -1) {
-        if (!sendInputDiff(body)) {
-          resetInputCapture();
-          return;
-        }
-        setInputValue(INPUT_SENTINEL + body);
-        return;
-      }
-      const before = body.slice(0, newlineIdx);
-      if (sendInputDiff(before)) sendTerminalInput(paneId, stringToBase64('\r'));
-      resetInputCapture();
-    },
-    [inputReady, paneId, resetInputCapture, sendInputDiff],
-  );
-
-  const handleInputBlur = useCallback(() => {
-    setFocused(false);
-    resetInputCapture();
-  }, [resetInputCapture]);
-  const handleInputFocus = useCallback(() => setFocused(true), []);
 
   const insets = useSafeAreaInsets();
   const { height } = useReanimatedKeyboardAnimation();
@@ -298,10 +233,10 @@ function TerminalSessionView({
     if (!inputReady) return;
     if (keyboardVisibleRef.current) {
       Keyboard.dismiss();
-      inputRef.current?.blur();
+      webRef.current?.blur();
       return;
     }
-    inputRef.current?.focus();
+    webRef.current?.focus();
   }, [inputReady]);
 
   const handleReady = useCallback(() => {
@@ -336,6 +271,7 @@ function TerminalSessionView({
           onFollowingBottomChange={setIsFollowingBottom}
           onTakeoverComplete={() => setTerminalPresented(true)}
           onTap={handleTap}
+          onFocusChange={setFocused}
           onNewTerminalShortcut={onNewTerminal}
           onSelectTabShortcut={onSelectTabShortcut}
           onRenderer={(renderer, reason) => {
@@ -354,16 +290,6 @@ function TerminalSessionView({
             style={jumpToBottomSlideStyle}
           />
         ) : null}
-
-        <TerminalInput
-          key={`${paneId}:${inputReady ? 'ready' : 'paused'}`}
-          ref={inputRef}
-          value={inputValue}
-          onChangeText={handleInputChange}
-          onFocus={handleInputFocus}
-          onBlur={handleInputBlur}
-          onHardwareInput={handleKeyBarBytes}
-        />
 
         {reconnecting ? (
           <View

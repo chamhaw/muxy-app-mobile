@@ -69,6 +69,10 @@ function createTakeoverRuntime() {
   const functions = [
     'decodeBase64',
     'combineWrites',
+    'finishWriteJob',
+    'drainWriteQueue',
+    'enqueueWriteJob',
+    'cancelPendingWriteBatch',
     'cancelTakeoverPresentation',
     'completeTakeover',
     'writeTakeoverSnapshot',
@@ -95,6 +99,10 @@ function createTakeoverRuntime() {
       root: { setAttribute: () => {}, removeAttribute: () => {} },
       pendingWrites: [],
       flushScheduled: false,
+      writeFlushRaf: 0,
+      writeQueue: [],
+      writeInProgress: false,
+      cancelAnimationFrame: () => {},
       takeoverInProgress: false,
       takeoverId: 0,
       takeoverStartedAt: 0,
@@ -337,6 +345,42 @@ describe('buildTerminalHtml', () => {
 
     expect(html).toContain('Array.isArray(msg.bytes)');
     expect(html).toContain('pendingWrites.push(decodeBase64(msg.bytes[writeIndex]));');
+  });
+
+  it('keeps the xterm textarea available for native IME composition', () => {
+    const html = buildTerminalHtml({ theme, fontFamily: 'Menlo', fontSize: 12 });
+    const runtime = terminalRuntime(html);
+
+    expect(runtime).not.toContain("helperTa.setAttribute('readonly'");
+    expect(runtime).not.toContain("helperTa.setAttribute('tabindex', '-1'");
+    expect(runtime).not.toContain("helperTa.style.pointerEvents = 'none'");
+    expect(runtime).toContain("post({ type: 'focusChanged', value: true });");
+    expect(runtime).toContain("post({ type: 'focusChanged', value: false });");
+  });
+
+  it('allows the native host to focus and blur xterm input directly', () => {
+    const html = buildTerminalHtml({ theme, fontFamily: 'Menlo', fontSize: 12 });
+    const runtime = terminalRuntime(html);
+
+    expect(runtime).toContain("case 'focusTerminal':\n          term.focus();");
+    expect(runtime).toContain("case 'blurTerminal':\n          term.blur();");
+    expect(runtime).toContain('try { term.focus(); } catch (_) {}');
+  });
+
+  it('serializes snapshots and terminal output through one write queue', () => {
+    const html = buildTerminalHtml({ theme, fontFamily: 'Menlo', fontSize: 12 });
+    const runtime = terminalRuntime(html);
+    const drainWriteQueue = terminalRuntimeFunctionSource(html, 'drainWriteQueue');
+
+    expect(runtime).toContain('var writeQueue = [];');
+    expect(runtime).toContain('function drainWriteQueue()');
+    expect(runtime).toContain("enqueueWriteJob({ kind: 'write', bytes: combined });");
+    expect(runtime).toContain("enqueueWriteJob({ kind: 'snapshot', bytes:");
+    expect(drainWriteQueue.indexOf('term.reset();')).toBeLessThan(
+      drainWriteQueue.indexOf("if (job.bytes.length === 0)"),
+    );
+    expect(drainWriteQueue).toContain('term.write(job.bytes, function () {');
+    expect(drainWriteQueue).toContain('finishWriteJob(scrollToBottom);');
   });
 
   it('resets the terminal before every takeover replay', () => {

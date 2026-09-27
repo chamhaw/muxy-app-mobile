@@ -23,6 +23,8 @@ export type TerminalWebViewHandle = {
   finishTakeover: (snapshot: string | null) => void;
   loadSnapshot: (base64: string) => void;
   setTheme: (theme: TerminalTheme) => void;
+  focus: () => void;
+  blur: () => void;
   clear: () => void;
   scrollToBottom: () => void;
   setKeyboardOffset: (offset: number, duration: number, phase: TerminalKeyboardPhase) => void;
@@ -47,6 +49,7 @@ type Props = {
   onTakeoverComplete?: () => void;
   onError?: (message: string) => void;
   onTap?: () => void;
+  onFocusChange?: (focused: boolean) => void;
   onNewTerminalShortcut?: () => void;
   onSelectTabShortcut?: (digit: number) => void;
   onRenderer?: (renderer: string, reason?: string) => void;
@@ -65,6 +68,7 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, Props>(function
     onTakeoverComplete,
     onError,
     onTap,
+    onFocusChange,
     onNewTerminalShortcut,
     onSelectTabShortcut,
     onRenderer,
@@ -136,6 +140,8 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, Props>(function
         send({ type: 'loadSnapshot', bytes: base64 });
       },
       setTheme: (next) => send({ type: 'setTheme', theme: next }),
+      focus: () => send({ type: 'focusTerminal' }),
+      blur: () => send({ type: 'blurTerminal' }),
       clear: () => {
         cancelQueuedWrites();
         send({ type: 'clear' });
@@ -181,6 +187,9 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, Props>(function
           return;
         case 'tap':
           onTap?.();
+          return;
+        case 'focusChanged':
+          onFocusChange?.(Boolean(msg.value));
           return;
         case 'newTerminalShortcut':
           onNewTerminalShortcut?.();
