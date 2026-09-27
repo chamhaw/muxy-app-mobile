@@ -18,6 +18,12 @@ command -v gh >/dev/null || fail "gh is required"
 old_main="$(git rev-parse --verify refs/heads/main)"
 old_master="$(git rev-parse --verify refs/heads/master)"
 git merge-base --is-ancestor "$old_main" "$old_master" || fail "main is not an ancestor of master"
+worktree_list="$(git worktree list --porcelain)"
+while IFS= read -r worktree_line; do
+  if [[ "$worktree_line" == "branch refs/heads/main" ]]; then
+    fail "Local main is checked out in another worktree; detach it before upgrading"
+  fi
+done <<< "$worktree_list"
 
 release="$(gh release view --repo muxy-app/mobile --json tagName,isDraft,isPrerelease --jq '[.tagName,.isDraft,.isPrerelease] | @tsv')"
 read -r release_tag is_draft is_prerelease <<< "$release"
