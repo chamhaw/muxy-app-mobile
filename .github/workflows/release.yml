@@ -25,6 +25,12 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       version_code: ${{ steps.v.outputs.version_code }}
     steps:
+      - name: Require fork master
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "Release must run from master"
+            exit 1
+          fi
       - id: v
         env:
           INPUT_VERSION: ${{ inputs.version }}

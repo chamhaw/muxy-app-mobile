@@ -2,11 +2,11 @@ name: iOS Native Checks
 
 on:
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - "ios-native/**"
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "ios-native/**"
 

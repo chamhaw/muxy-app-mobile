@@ -55,6 +55,12 @@ jobs:
       APP_EXPORT_PATH: ios-native/build/export
       BUNDLE_ID: com.muxy.app
     steps:
+      - name: Require fork master
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "Release must run from master"
+            exit 1
+          fi
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
