@@ -43,9 +43,14 @@ git branch -f main "$target_commit"
 
 if ! git merge --no-ff --no-edit main; then
   git diff --name-only --diff-filter=U >&2
-  git merge --abort || fail "Merge abort failed; inspect master before continuing"
+  if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then
+    git merge --abort || {
+      git branch -f main "$old_main"
+      fail "Merge abort failed; main restored, inspect master before continuing"
+    }
+  fi
   git branch -f main "$old_main"
-  fail "Merge conflicted; main and master restored, backup retained"
+  fail "Merge failed; main restored, inspect master before continuing"
 fi
 
 git merge-base --is-ancestor main master || fail "Merged master does not contain main"
