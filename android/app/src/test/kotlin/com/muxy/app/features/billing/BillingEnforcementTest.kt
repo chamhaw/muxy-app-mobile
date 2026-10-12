@@ -7,6 +7,20 @@ import org.junit.Test
 
 class BillingEnforcementTest {
     @Test
+    fun disabledBillingAllowsStartupWithoutLoadingTheTrial() {
+        val enforcement = BillingEnforcement(isDebug = false, enforced = false)
+        assertFalse(enforcement.blocksStartup(trialLoaded = false))
+        assertFalse(enforcement.gates(Entitlement.Expired))
+    }
+
+    @Test
+    fun enforcedBillingWaitsForTheTrialBeforeShowingTheApp() {
+        val enforcement = BillingEnforcement(isDebug = false)
+        assertTrue(enforcement.blocksStartup(trialLoaded = false))
+        assertFalse(enforcement.blocksStartup(trialLoaded = true))
+    }
+
+    @Test
     fun debugBuildsAreNotEnforcedByDefault() {
         assertFalse(BillingEnforcement(isDebug = true).enforced)
     }

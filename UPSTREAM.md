@@ -6,7 +6,7 @@ The current baseline is `v3.1.0`, commit `e40af75c8675cf23f4111580aca7a0ba05ffc3
 
 ## Fork behavior
 
-- Android's application container disables billing enforcement. Expired trials do not block connections, the entitlement footer is hidden, and foreground entry does not refresh Google Play billing. Purchase infrastructure remains upstream-owned.
+- Android's application container disables billing enforcement. Startup does not wait for trial data when billing is disabled. Expired trials do not block connections, the entitlement footer is hidden, and foreground entry does not refresh Google Play billing. Purchase infrastructure remains upstream-owned.
 - Release workflows require `master`; native Android and iOS checks target `master`.
 - The React Native/xterm input and output patches are retired with the upstream React Native client. Kotlin's terminal input session handles IME composition and modifier encoding; the native terminal emulator handles output and snapshots. Device validation must cover Chinese composition, Ctrl/Alt keys, reconnect output, and scrollback.
 - The uncommitted `fix/mobile-terminal-ime` worktree remains a recovery source for historical terminal behavior and is not a build source.

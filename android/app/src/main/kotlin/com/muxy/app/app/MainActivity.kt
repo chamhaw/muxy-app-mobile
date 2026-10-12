@@ -28,7 +28,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen().setKeepOnScreenCondition {
-            !container.ready.value || viewModel.settings.value == null || !container.billing.state.value.trialLoaded
+            !container.ready.value || viewModel.settings.value == null ||
+                container.billing.enforcement.blocksStartup(container.billing.state.value.trialLoaded)
         }
         super.onCreate(savedInstanceState)
         themedWindow.apply(AppTheme.muxy)

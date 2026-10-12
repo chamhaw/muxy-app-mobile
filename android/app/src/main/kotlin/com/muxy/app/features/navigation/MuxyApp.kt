@@ -48,7 +48,7 @@ fun MuxyApp(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val billingState by container.billing.state.collectAsStateWithLifecycle()
     val loaded = settings ?: return
-    if (!billingState.trialLoaded) return
+    if (container.billing.enforcement.blocksStartup(billingState.trialLoaded)) return
     val backStack =
         rememberSerializable(serializer = NavBackStackSerializer(AppRoute.serializer())) {
             NavBackStack<AppRoute>(AppRoute.Connections)
