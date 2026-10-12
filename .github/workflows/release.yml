@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       release_ios:
-        description: "Release iOS (React Native)"
+        description: "Release iOS"
         required: true
         type: boolean
         default: true
@@ -17,13 +17,21 @@ on:
         required: true
         type: boolean
         default: true
+      android_changes_not_sent_for_review:
+        description: "Save Android changes for manual Play review submission (required after rejection)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.v.outputs.version }}
       version_code: ${{ steps.v.outputs.version_code }}
+      sdk_version: ${{ steps.sdk.outputs.version }}
     steps:
       - name: Require fork master
         run: |
@@ -49,6 +57,18 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$(date +%s)" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select Muxy SDK
+        id: sdk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SDK_VERSION=$(python3 scripts/lib/sdk_release.py)
+          echo "version=$SDK_VERSION" >> "$GITHUB_OUTPUT"
+
   ios:
     if: ${{ inputs.release_ios }}
     needs: validate
@@ -56,6 +76,7 @@ jobs:
     with:
       version: ${{ needs.validate.outputs.version }}
       build_number: ${{ needs.validate.outputs.version_code }}
+      sdk_version: ${{ needs.validate.outputs.sdk_version }}
       skip_release_tag: true
     secrets: inherit
 
@@ -66,6 +87,8 @@ jobs:
     with:
       version_name: ${{ needs.validate.outputs.version }}
       version_code: ${{ needs.validate.outputs.version_code }}
+      sdk_version: ${{ needs.validate.outputs.sdk_version }}
+      changes_not_sent_for_review: ${{ inputs.android_changes_not_sent_for_review }}
       skip_release_tag: true
     secrets: inherit
 
@@ -84,6 +107,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.validate.outputs.version }}
+          IOS_SDK_VERSION: ${{ needs.ios.outputs.sdk_version }}
+          ANDROID_SDK_VERSION: ${{ needs.android.outputs.sdk_version }}
         run: |
           PREV_TAG=$(gh release list \
             --repo "${{ github.repository }}" \
@@ -101,6 +126,14 @@ jobs:
 
           if [[ ! -s notes.md ]]; then
             echo "- No changes since ${PREV_TAG:-initial release}" > notes.md
+          fi
+
+          if [[ -n "$IOS_SDK_VERSION" ]]; then
+            printf '\niOS: built with Muxy SDK %s.\n' "$IOS_SDK_VERSION" >> notes.md
+          fi
+
+          if [[ -n "$ANDROID_SDK_VERSION" ]]; then
+            printf '\nAndroid: built with Muxy SDK %s.\n' "$ANDROID_SDK_VERSION" >> notes.md
           fi
 
           gh release create "v$VERSION" \

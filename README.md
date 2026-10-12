@@ -16,12 +16,12 @@ Native iOS and Android clients for the [Muxy](https://github.com/muxy-app/muxy) 
 2. On your Mac, open Muxy → Settings (`Cmd + ,`) → Mobile, enable **Allow mobile device connection**.
 3. Open the Android app, enter the IP and port, approve the connection on your Mac.
 
+For Muxy 2, choose **Add Connection → Muxy 2** and connect with a pairing code or SSH. SSH opens the remote computer's Muxy projects, terminals, files, and Git tools; Muxy must already be installed there. The separate **SSH** connection type opens a regular shell.
+
 ## Development
 
-```sh
-npm install
-npm start
-```
+- [iOS development](ios/README.md) — Swift, SwiftUI and SwiftTerm.
+- [Android development](android/README.md) — Kotlin and Jetpack Compose.
 
 ## License
 
