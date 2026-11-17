@@ -192,7 +192,8 @@ class TabsCatalog(
             connections.connections.value?.firstOrNull { it.id == entry.connection.id } == entry.connection
 
     private fun hasAccess(connection: Connection): Boolean =
-        isDemo(connection) || (billing.state.value.trialLoaded && !billing.enforcement.gates(billing.state.value.entitlement))
+        !billing.enforcement.enforced || isDemo(connection) ||
+            (billing.state.value.trialLoaded && !billing.enforcement.gates(billing.state.value.entitlement))
 
     private fun isDemo(connection: Connection): Boolean = connection.id == DemoConnection.id && connection.kind == ConnectionKind.DEVICE
 
