@@ -3,7 +3,6 @@ package com.muxy.app.features.addconnection
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.annotation.DrawableRes
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,16 +14,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,13 +39,18 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muxy.app.R
 import com.muxy.app.design.LocalAppTheme
+import com.muxy.app.design.components.CardRow
+import com.muxy.app.design.components.ListRow
 import com.muxy.app.design.components.MuxyTopAppBar
 import com.muxy.app.design.components.RowPosition
+import com.muxy.app.design.components.ThemedAlertDialog
 import com.muxy.app.design.components.ThemedCell
+import com.muxy.app.design.components.ThemedDialogAction
 import com.muxy.app.design.components.ThemedList
 import com.muxy.app.design.components.ThemedListItem
 import com.muxy.app.design.components.ThemedSectionFooter
 import com.muxy.app.design.components.ThemedSectionHeader
+import com.muxy.app.design.components.ThemedSegmentedPicker
 import com.muxy.app.design.components.ThemedTextField
 import com.muxy.app.design.components.TopBarAction
 import com.muxy.app.design.components.TopBarTextAction
@@ -62,8 +61,7 @@ import com.muxy.app.models.ServerTransport
 import com.muxy.app.networking.muxy1.discovery.DiscoveredService
 import kotlinx.coroutines.launch
 
-private val rowIconSize = 24.dp
-private val rowSeparatorInset = 16.dp + rowIconSize + 16.dp
+private val rowIconSize = ListRow.iconSize
 
 @Composable
 fun AddConnectionScreen(
@@ -128,11 +126,11 @@ fun AddConnectionScreen(
         }
     }
     viewModel.alert?.let { alert ->
-        AlertDialog(
+        ThemedAlertDialog(
+            title = alert.title,
+            message = alert.message,
             onDismissRequest = viewModel::dismissAlert,
-            confirmButton = { TextButton(onClick = viewModel::dismissAlert) { Text("OK") } },
-            title = { Text(alert.title) },
-            text = { Text(alert.message) },
+            confirm = ThemedDialogAction("OK", viewModel::dismissAlert),
         )
     }
 }
@@ -155,24 +153,20 @@ private fun KindPicker(
     enabled: Boolean,
     onSelect: (ConnectionKind) -> Unit,
 ) {
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        pickerKinds.forEachIndexed { index, (kind, title) ->
-            SegmentedButton(
-                selected = kind == selected,
-                onClick = { onSelect(kind) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = pickerKinds.size),
-                enabled = enabled,
-                icon = {},
-                label = { Text(title) },
-            )
-        }
-    }
+    ThemedSegmentedPicker(
+        options = pickerKinds.keys.toList(),
+        selected = selected,
+        label = { pickerKinds.getValue(it) },
+        onSelect = onSelect,
+        enabled = enabled,
+        modifier = Modifier.padding(vertical = 8.dp),
+    )
 }
 
 private const val PAIRING_WARNING =
     "Only pair with a code shown on your own computer. A paired phone can do anything a terminal on that computer can."
 
-private val pickerKinds = listOf(ConnectionKind.DEVICE to "Muxy 1", ConnectionKind.SERVER to "Muxy 2", ConnectionKind.SSH to "SSH")
+private val pickerKinds = mapOf(ConnectionKind.SERVER to "Muxy 2", ConnectionKind.DEVICE to "Muxy 1", ConnectionKind.SSH to "SSH")
 
 @Composable
 private fun ServerTransportPicker(
@@ -180,19 +174,14 @@ private fun ServerTransportPicker(
     enabled: Boolean,
     onSelect: (ServerTransport) -> Unit,
 ) {
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        ServerTransport.entries.forEachIndexed { index, transport ->
-            SegmentedButton(
-                selected = transport == selected,
-                onClick = { onSelect(transport) },
-                shape = SegmentedButtonDefaults.itemShape(index, ServerTransport.entries.size),
-                enabled = enabled,
-                icon = {},
-            ) {
-                Text(if (transport == ServerTransport.PAIRED) "Pairing Code" else "SSH")
-            }
-        }
-    }
+    ThemedSegmentedPicker(
+        options = ServerTransport.entries,
+        selected = selected,
+        label = { if (it == ServerTransport.PAIRED) "Pairing Code" else "SSH" },
+        onSelect = onSelect,
+        enabled = enabled,
+        modifier = Modifier.padding(vertical = 8.dp),
+    )
 }
 
 private fun LazyListScope.deviceSections(
@@ -217,8 +206,11 @@ private fun LazyListScope.serverSections(
     onScan: () -> Unit,
     onPaste: () -> Unit,
 ) {
+    if (pairing.target == null) {
+        desktopPairingSection()
+    }
     item(key = "server-scan") {
-        ThemedCell(RowPosition.FIRST, rowSeparatorInset) {
+        ThemedCell(RowPosition.FIRST) {
             ActionRow(icon = R.drawable.ic_qr_code_scanner, title = "Scan QR Code", enabled = enabled, onClick = onScan)
         }
     }
@@ -231,7 +223,7 @@ private fun LazyListScope.serverSections(
     item(key = "computer-header") { ThemedSectionHeader("Computer") }
     item(key = "computer-address") {
         ThemedCell(RowPosition.SINGLE) {
-            ThemedListItem(headline = { Text("Address") }, trailing = { Text(target.address) })
+            CardRow(title = "Address", value = target.address)
         }
     }
     item(key = "computer-footer") { ThemedSectionFooter(PAIRING_WARNING) }
@@ -248,8 +240,24 @@ private fun LazyListScope.serverSections(
         }
     }
     item(key = "phone-footer") {
-        ThemedSectionFooter("Your computer lists this phone under this name in Settings → Mobile.")
+        ThemedSectionFooter("Your computer lists this phone under this name in Manage devices.")
     }
+}
+
+private fun LazyListScope.desktopPairingSection() {
+    themedSection(
+        items = DesktopPairingGuide.steps,
+        key = { "pairing-step:${it.title}" },
+        header = "On Your Desktop",
+    ) { step ->
+        ThemedListItem(
+            headline = { Text(step.title) },
+            supporting = { Text(step.body) },
+            leading = { RowIcon(step.icon) },
+        )
+    }
+    item(key = "pairing-instructions") { ThemedSectionFooter(DesktopPairingGuide.SCAN_INSTRUCTIONS) }
+    sectionGap(key = "server-scan-gap")
 }
 
 private fun LazyListScope.sectionGap(key: String) {
@@ -268,12 +276,13 @@ private fun LazyListScope.nearbySection(
         }
         return
     }
-    themedSection(items = services, key = { "nearby:${it.name}" }, separatorInset = rowSeparatorInset) { service ->
-        ThemedListItem(
-            headline = { Text(service.name) },
-            supporting = { Text("${service.host}:${service.port}") },
-            leading = { RowIcon(R.drawable.ic_desktop_mac) },
-            modifier = Modifier.clickable(enabled = enabled) { onSelect(service) },
+    themedSection(items = services, key = { "nearby:${it.name}" }) { service ->
+        CardRow(
+            title = service.name,
+            icon = R.drawable.ic_desktop_mac,
+            supporting = "${service.host}:${service.port}",
+            enabled = enabled,
+            onClick = { onSelect(service) },
         )
     }
 }
@@ -338,11 +347,7 @@ private fun ActionRow(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    ThemedListItem(
-        headline = { Text(title) },
-        leading = { RowIcon(icon) },
-        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
-    )
+    CardRow(title = title, icon = icon, enabled = enabled, onClick = onClick)
 }
 
 @Composable
@@ -366,9 +371,7 @@ private fun StatusRow(status: AddConnectionStatus) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         when (status) {
-            AddConnectionStatus.Idle -> {
-                Unit
-            }
+            AddConnectionStatus.Idle -> {}
 
             AddConnectionStatus.Connecting -> {
                 Progress("Connecting…")
@@ -399,6 +402,6 @@ private fun StatusRow(status: AddConnectionStatus) {
 @Composable
 private fun Progress(text: String) {
     val theme = LocalAppTheme.current
-    CircularProgressIndicator(modifier = Modifier.size(rowIconSize), color = theme.accent, strokeWidth = 2.dp)
+    CircularProgressIndicator(modifier = Modifier.size(rowIconSize), color = theme.secondaryForeground, strokeWidth = 2.dp)
     Text(text = text, color = theme.foreground)
 }

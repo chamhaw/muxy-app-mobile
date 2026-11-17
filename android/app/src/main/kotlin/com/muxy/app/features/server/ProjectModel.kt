@@ -21,14 +21,24 @@ class ProjectModel(
     private val mutableTabs = MutableStateFlow<List<ServerTerminal>>(emptyList())
     private val mutableSelectedTabId = MutableStateFlow<UUID?>(null)
     private val mutableHasLoadedSessions = MutableStateFlow(false)
+    private val mutableIsRefreshingSessions = MutableStateFlow(false)
+    private val mutableSessionsLoadFailed = MutableStateFlow(false)
     private val endedSessionIds = mutableSetOf<ULong>()
+    private val sessionsRefresh = CoalescedRefresh(scope)
+    private var sessionsGeneration = 0
+    private var isBrowsing = false
 
     val tabs: StateFlow<List<ServerTerminal>> = mutableTabs.asStateFlow()
     val selectedTabId: StateFlow<UUID?> = mutableSelectedTabId.asStateFlow()
     val hasLoadedSessions: StateFlow<Boolean> = mutableHasLoadedSessions.asStateFlow()
+    val isRefreshingSessions: StateFlow<Boolean> = mutableIsRefreshingSessions.asStateFlow()
+    val sessionsLoadFailed: StateFlow<Boolean> = mutableSessionsLoadFailed.asStateFlow()
 
     var isVisible = false
         private set
+
+    val needsSessions: Boolean
+        get() = isVisible || isBrowsing
 
     val selectedTab: ServerTerminal?
         get() = mutableTabs.value.firstOrNull { it.id == mutableSelectedTabId.value }
@@ -37,17 +47,33 @@ class ProjectModel(
         if (isVisible == visible) return
         isVisible = visible
         server.updateVisibleTerminal()
+        if (!needsSessions) cancelSessionRefresh()
         if (!visible) return
         server.refreshSessions(this)
     }
 
-    fun createTab() {
-        val tab = ServerTerminal(projectId, sessionId = null, server = server, scope = scope)
+    fun setBrowsing(browsing: Boolean) {
+        if (isBrowsing == browsing) return
+        isBrowsing = browsing
+        if (!needsSessions) cancelSessionRefresh()
+    }
+
+    fun createTab(): ServerTerminal {
+        val tab =
+            ServerTerminal(
+                projectId,
+                sessionId = null,
+                server = server,
+                scope = scope,
+                directory = server.project(projectId)?.directory.orEmpty(),
+            )
         mutableTabs.value += tab
         select(tab)
+        return tab
     }
 
     fun select(tab: ServerTerminal) {
+        if (tab.isRetired || mutableTabs.value.none { it === tab }) return
         if (mutableSelectedTabId.value == tab.id) return
         mutableSelectedTabId.value = tab.id
         server.updateVisibleTerminal()
@@ -67,6 +93,17 @@ class ProjectModel(
         }
     }
 
+    fun openTab(session: Session): ServerTerminal {
+        mutableTabs.value.firstOrNull { it.sessionId == session.id && !it.isRetired }?.let { existing ->
+            select(existing)
+            return existing
+        }
+        endedSessionIds -= session.id
+        val tab = makeTab(session)
+        select(tab)
+        return tab
+    }
+
     fun sessionDidEnd(sessionId: ULong) {
         endedSessionIds += sessionId
         val tab = mutableTabs.value.firstOrNull { it.sessionId == sessionId } ?: return
@@ -81,21 +118,48 @@ class ProjectModel(
             .forEach(::remove)
     }
 
-    suspend fun refreshSessions(connection: ServerConnection) {
-        val knownBeforeRequest = mutableTabs.value.mapNotNull { it.sessionId }.toSet()
-        attempt { connection.sessions(projectId) }
-            .onSuccess { listed ->
-                val live = listed.filter { it.status == SessionStatus.LIVE || it.status == SessionStatus.STARTING }
-                mutableHasLoadedSessions.value = true
-                reconcile(live, knownBeforeRequest)
-            }.onFailure { Log.connection.error("Loading sessions failed: ${ServerFailure.from(it)}") }
+    fun refreshSessions(connection: ServerConnection) {
+        if (!needsSessions) return
+        sessionsRefresh.request { loadSessions(connection) }
+    }
+
+    fun connectionDidClose() {
+        cancelSessionRefresh()
+        mutableTabs.value.forEach(ServerTerminal::connectionDidClose)
     }
 
     fun removeAllTabs() {
+        cancelSessionRefresh()
         mutableTabs.value.forEach(server::retire)
         mutableTabs.value = emptyList()
         mutableSelectedTabId.value = null
         server.updateVisibleTerminal()
+    }
+
+    private suspend fun loadSessions(connection: ServerConnection) {
+        if (connection !== server.connection || !needsSessions) return
+        val token = sessionsGeneration
+        val knownBeforeRequest = mutableTabs.value.mapNotNull { it.sessionId }.toSet()
+        mutableIsRefreshingSessions.value = true
+        val result = attempt { connection.sessions(projectId) }
+        if (token != sessionsGeneration || connection !== server.connection || !needsSessions) return
+        mutableIsRefreshingSessions.value = false
+        result
+            .onSuccess { listed ->
+                val live = listed.filter { it.status == SessionStatus.LIVE || it.status == SessionStatus.STARTING }
+                mutableHasLoadedSessions.value = true
+                mutableSessionsLoadFailed.value = false
+                reconcile(live, knownBeforeRequest)
+            }.onFailure {
+                mutableSessionsLoadFailed.value = true
+                Log.connection.error("Loading sessions failed: ${ServerFailure.from(it)}")
+            }
+    }
+
+    private fun cancelSessionRefresh() {
+        sessionsGeneration += 1
+        sessionsRefresh.cancel()
+        mutableIsRefreshingSessions.value = false
     }
 
     private fun reconcile(
@@ -105,6 +169,7 @@ class ProjectModel(
         val liveIds = sessions.map { it.id }.toSet()
         endedSessionIds.retainAll(liveIds)
         pruneEnded(knownBeforeRequest - liveIds)
+        retitle(sessions)
         appendNew(sessions)
         if (selectedTab != null) return
         mutableTabs.value.firstOrNull()?.let(::select)
@@ -118,16 +183,27 @@ class ProjectModel(
         }
     }
 
+    private fun retitle(sessions: List<Session>) {
+        val titles = sessions.associate { it.id to it.title }
+        mutableTabs.value.forEach { tab ->
+            val title = tab.sessionId?.let(titles::get) ?: return@forEach
+            tab.retitle(title)
+        }
+    }
+
     private fun appendNew(sessions: List<Session>) {
         val open = mutableTabs.value.mapNotNull { it.sessionId }.toSet()
         sessions
             .filter { it.id !in open && it.id !in endedSessionIds }
             .sortedBy { it.id }
-            .forEach { session ->
-                val tab = ServerTerminal(projectId, session.id, server, scope)
-                server.register(tab, session.id)
-                mutableTabs.value += tab
-            }
+            .forEach(::makeTab)
+    }
+
+    private fun makeTab(session: Session): ServerTerminal {
+        val tab = ServerTerminal(projectId, session.id, server, scope, session.directory, session.title)
+        server.register(tab, session.id, session.title)
+        mutableTabs.value += tab
+        return tab
     }
 
     private fun remove(tab: ServerTerminal) {

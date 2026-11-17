@@ -2,7 +2,7 @@
 
 `main` points to the exact commit of the selected upstream stable GitHub release tag. It contains no fork changes. `master` contains that commit and the local Muxy Mobile changes. Build and release workflows run from `master`.
 
-The current baseline is `v3.1.0`, commit `e40af75c8675cf23f4111580aca7a0ba05ffc3b8`. The previous baseline was `v2.5.2`, commit `823c4f8cf7875d612d1ee14d59b9cface2e21bc9`. Android and iOS pin the Muxy SDK `2.1.0`, with protocol version 2 and compatibility 21.
+The current baseline is `v3.3.0`, commit `9e99393164cb0e9caed9345971f67f466f391555`. The previous baseline was `v3.1.0`, commit `e40af75c8675cf23f4111580aca7a0ba05ffc3b8`. Android and iOS pin the Muxy SDK `2.5.0-beta.1321` with the upstream release checksums.
 
 ## Fork behavior
 
@@ -19,7 +19,7 @@ The project pins standard HotSpot JDK `oracle-21.0.11` in `.mise.toml`; the side
 bash android/scripts/build-sideload-apk.sh /path/to/existing/debug.keystore
 ```
 
-The script builds a non-debuggable, minified `3.1.0` APK with only `arm64-v8a`, signs it with the supplied Android debug keystore, verifies its signature and release component registrations, and writes `android/app/build/outputs/apk/release/muxyapp.apk`. Use the same signing key as the previous sideload build for in-place updates. The APK requires Android 10 or newer; it is not a Play Store artifact. Run native unit tests with `mise exec -- android/scripts/run.sh test` and checks with `mise exec -- android/scripts/checks.sh`. New fork regression tests follow device visual acceptance.
+The script builds a non-debuggable, minified `3.3.0` APK with only `arm64-v8a`, signs it with the supplied Android debug keystore, verifies its signature and release component registrations, and writes `android/app/build/outputs/apk/release/muxyapp.apk`. Use the same signing key as the previous sideload build for in-place updates. The APK requires Android 10 or newer; it is not a Play Store artifact. Run native unit tests with `mise exec -- android/scripts/run.sh test` and checks with `mise exec -- android/scripts/checks.sh`. New fork regression tests follow device visual acceptance.
 
 ## Upstream upgrades
 

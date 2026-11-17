@@ -28,7 +28,6 @@ struct AddConnectionView: View {
                     statusSection
                 }
             }
-            .tint(theme.accent)
             .screenTitle("Add Connection")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -36,12 +35,10 @@ struct AddConnectionView: View {
                         submissionTask?.cancel()
                         dismiss()
                     }
-                    .tint(theme.foreground)
                     .disabled(viewModel.isWorking && !viewModel.isRemoteSSH)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     submitButton
-                        .tint(theme.foreground)
                 }
             }
             .sheet(isPresented: $viewModel.isShowingScanner) {
@@ -74,8 +71,8 @@ struct AddConnectionView: View {
     private var kindSection: some View {
         Section {
             Picker("Type", selection: kindBinding) {
-                Text("Muxy 1").tag(ConnectionKind.device)
                 Text("Muxy 2").tag(ConnectionKind.server)
+                Text("Muxy 1").tag(ConnectionKind.device)
                 Text("SSH").tag(ConnectionKind.ssh)
             }
             .pickerStyle(.segmented)
@@ -113,6 +110,10 @@ struct AddConnectionView: View {
 
     @ViewBuilder
     private var serverPairingSections: some View {
+        if viewModel.serverPairing.target == nil {
+            desktopPairingSection
+        }
+
         Section {
             Button {
                 viewModel.isShowingScanner = true
@@ -126,7 +127,7 @@ struct AddConnectionView: View {
                 guard let link = links.first else { return }
                 viewModel.serverPairing.receive(link: link, source: .manual)
             }
-            .tint(theme.accent)
+            .tint(theme.secondaryForeground)
         }
         .disabled(viewModel.isWorking)
 
@@ -148,10 +149,25 @@ struct AddConnectionView: View {
             } header: {
                 ThemedSectionHeader("This Phone")
             } footer: {
-                Text("Your computer lists this phone under this name in Settings → Mobile.")
+                Text("Your computer lists this phone under this name in Manage devices.")
                     .foregroundStyle(theme.secondaryForeground)
             }
             .disabled(viewModel.isWorking)
+        }
+    }
+
+    private var desktopPairingSection: some View {
+        Section {
+            ForEach(DesktopPairingGuide.steps) { step in
+                CardRow(step.title, systemImage: step.symbolName, subtitle: step.body) {}
+                    .listRowInsets(EdgeInsets())
+                    .accessibilityElement(children: .combine)
+            }
+        } header: {
+            ThemedSectionHeader("On Your Desktop")
+        } footer: {
+            Text(DesktopPairingGuide.scanInstructions)
+                .foregroundStyle(theme.secondaryForeground)
         }
     }
 

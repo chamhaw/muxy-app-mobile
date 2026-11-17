@@ -26,7 +26,7 @@ scripts/sdk.sh check
 PINNED_VERSION="$(sed -E 's/.*muxy-mobile-(.*)-android.zip/\1/' MuxyMobileSDK/SHA256SUMS)"
 [[ "$(cat MuxyMobileSDK/Installed/REVISION)" == "$PINNED_VERSION" ]] || fail "Installed SDK does not match the release pin"
 VERSION_CODE="$(date +%s)"
-VERSION_NAME="3.1.0"
+VERSION_NAME="3.3.0"
 source scripts/release-inputs.sh
 validate_release_inputs
 mise exec -- ./gradlew :app:assembleRelease -PmuxyArm64Only=true -PversionName="$VERSION_NAME" -PversionCode="$VERSION_CODE"

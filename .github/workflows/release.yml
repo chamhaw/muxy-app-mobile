@@ -31,7 +31,6 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       version_code: ${{ steps.v.outputs.version_code }}
-      sdk_version: ${{ steps.sdk.outputs.version }}
     steps:
       - name: Require fork master
         run: |
@@ -61,13 +60,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Muxy SDK
-        id: sdk
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SDK_VERSION=$(python3 scripts/lib/sdk_release.py)
-          echo "version=$SDK_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Check Muxy SDK pins
+        run: python3 scripts/lib/sdk_pin.py
 
   ios:
     if: ${{ inputs.release_ios }}
@@ -76,7 +70,6 @@ jobs:
     with:
       version: ${{ needs.validate.outputs.version }}
       build_number: ${{ needs.validate.outputs.version_code }}
-      sdk_version: ${{ needs.validate.outputs.sdk_version }}
       skip_release_tag: true
     secrets: inherit
 
@@ -87,7 +80,6 @@ jobs:
     with:
       version_name: ${{ needs.validate.outputs.version }}
       version_code: ${{ needs.validate.outputs.version_code }}
-      sdk_version: ${{ needs.validate.outputs.sdk_version }}
       changes_not_sent_for_review: ${{ inputs.android_changes_not_sent_for_review }}
       skip_release_tag: true
     secrets: inherit

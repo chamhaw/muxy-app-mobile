@@ -2,9 +2,11 @@ import MuxyMobile
 import OSLog
 import QuartzCore
 import UIKit
+import UniformTypeIdentifiers
 
 final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     var onKeyboardOffsetChange: ((CGFloat) -> Void)?
+    var onPickImages: (() -> Void)?
 
     private let controller: TerminalController
     private let scrollView = UIScrollView()
@@ -26,6 +28,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     private var momentumVelocity: CGFloat = 0
     private var momentumTimestamp: CFTimeInterval = 0
     private var historyPullDistance: CGFloat = 0
+    private var wheel = TerminalWheelAccumulator()
+    private var wheelLocation: CGPoint = .zero
     private let canvas: TerminalCanvasView
     private let input = TerminalInputView()
     private let accessoryBar = TerminalAccessoryBar()
@@ -38,6 +42,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     private var columnCount = 0
     private var cursor: TerminalCursorMark?
     private var liveHistoryRows: UInt64 = 0
+    private var mouseTracking = false
+    private var readsScrolling = false
     private var displayedHistory: HistoryDocument?
     private var isRequestingHistory = false
     private var isLoadingOlderHistory = false
@@ -50,6 +56,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     }
 
     private var autoFocus = false
+    private var isActive = false
 
     init(controller: TerminalController, theme: ThemePalette, useNerdFont: Bool) {
         self.controller = controller
@@ -70,8 +77,11 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         nil
     }
 
-    func update(theme: ThemePalette, useNerdFont: Bool, autoFocus: Bool) {
+    func update(theme: ThemePalette, useNerdFont: Bool, autoFocus: Bool, isActive: Bool) {
+        let becameActiveOrInactive = isActive != self.isActive
         self.autoFocus = autoFocus
+        self.isActive = isActive
+        if becameActiveOrInactive { syncFocus() }
         guard theme != self.theme || useNerdFont != self.useNerdFont else { return }
         self.theme = theme
         self.useNerdFont = useNerdFont
@@ -101,12 +111,26 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         screenNeedsRefresh()
         input.setSoftKeyboardHidden(!autoFocus)
         accessoryBar.setKeyboardVisible(autoFocus)
+        syncFocus()
+    }
+
+    private func syncFocus() {
+        guard window != nil, isActive else {
+            if input.isFirstResponder { input.resignFirstResponder() }
+            return
+        }
+        guard !input.isFirstResponder else { return }
+        if let transition = activeNavigationTransition {
+            transition.animate(alongsideTransition: nil) { [weak self] _ in self?.syncFocus() }
+            return
+        }
         input.becomeFirstResponder()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         guard bounds.width > 0, bounds.height > 0 else { return }
+        accessoryBar.alignContent(toPageOf: self)
         syncKeyboardOffset()
         positionKeyboardOcclusion()
         guard lockTerminalSizeIfStable() else { return }
@@ -120,21 +144,21 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === viewportPanGesture else { return true }
-        guard viewportState.keyboardOffset > 0, selection == nil else { return false }
+        guard selection == nil, viewportState.keyboardOffset > 0 || forwardsScrolling else { return false }
         let velocity = viewportPanGesture.velocity(in: self)
         return abs(velocity.y) > abs(velocity.x)
     }
 
     private func lockTerminalSizeIfStable() -> Bool {
-        if terminalSize != nil { return true }
-        guard terminalDimensionsAreUsable else { return false }
+        if terminalSize == bounds.size { return true }
+        guard terminalDimensionsAreUsable else { return terminalSize != nil }
         pendingTerminalSize = bounds.size
-        guard !terminalSizeConfirmationScheduled else { return false }
+        guard !terminalSizeConfirmationScheduled else { return terminalSize != nil }
         terminalSizeConfirmationScheduled = true
         DispatchQueue.main.async { [weak self] in
             self?.confirmTerminalSize()
         }
-        return false
+        return terminalSize != nil
     }
 
     private var terminalDimensionsAreUsable: Bool {
@@ -144,7 +168,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
 
     private func confirmTerminalSize() {
         terminalSizeConfirmationScheduled = false
-        guard terminalSize == nil, let pendingTerminalSize else { return }
+        guard let pendingTerminalSize else { return }
         guard pendingTerminalSize == bounds.size, terminalDimensionsAreUsable else {
             setNeedsLayout()
             return
@@ -155,10 +179,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     }
 
     private func syncKeyboardOffset() {
-        let guideFrame = keyboardLayoutGuide.layoutFrame
-        let nextOffset = guideFrame == .zero
-            ? 0
-            : min(bounds.height, max(0, bounds.maxY - guideFrame.minY))
+        let nextOffset = TerminalViewportState.keyboardOverlap(in: bounds, keyboardFrame: keyboardLayoutGuide.layoutFrame)
         guard abs(nextOffset - viewportState.keyboardOffset) > 0.5 else { return }
         stopMomentum()
         historyPullDistance = 0
@@ -178,11 +199,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     }
 
     private func placeCursorAboveKeyboard() {
-        guard terminalSize != nil, viewportState.needsCursorPlacement else { return }
-        guard displayedHistory == nil else {
-            viewportState.stopFollowingCursor()
-            return
-        }
+        guard terminalSize != nil, displayedHistory == nil, viewportState.needsCursorPlacement else { return }
         guard let cursorFrame else { return }
         let previousOffset = viewportState.viewportOffset
         viewportState.placeCursor(
@@ -227,6 +244,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
             controller.setFollowing(false)
             controller.discardOutdatedHistoryPrefetch()
             historyPullDistance = 0
+            wheel.reset()
+            wheelLocation = gesture.location(in: self)
             if let renderedFrame = scrollView.layer.presentation()?.frame {
                 viewportState.captureRenderedOffset(-renderedFrame.minY)
                 scrollView.layer.removeAllAnimations()
@@ -235,6 +254,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         case .changed:
             let translation = gesture.translation(in: self)
             gesture.setTranslation(.zero, in: self)
+            wheelLocation = gesture.location(in: self)
             routeViewportScroll(delta: -translation.y)
         case .ended:
             startMomentum(velocity: -gesture.velocity(in: self).y)
@@ -257,6 +277,10 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         positionTerminal()
         let viewportMoved = previousOffset != viewportState.viewportOffset
         guard residual != 0 else { return viewportMoved }
+        guard !forwardsScrolling else {
+            sendWheel(delta: residual)
+            return true
+        }
         let currentOffset = scrollView.contentOffset.y
         let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
         let nextOffset = min(max(0, currentOffset + residual), maxOffset)
@@ -269,6 +293,19 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         }
         prefetchOlderHistory()
         return viewportMoved || scrollView.contentOffset.y != currentOffset
+    }
+
+    private var forwardsScrolling: Bool {
+        displayedHistory == nil && readsScrolling
+    }
+
+    private func sendWheel(delta: CGFloat) {
+        let steps = wheel.steps(for: delta, rowHeight: metrics.cellHeight)
+        guard steps != 0, let cell = cell(at: wheelLocation) else { return }
+        let direction: ScrollDirection = steps > 0 ? .down : .up
+        for _ in 0..<abs(steps) {
+            controller.scroll(direction, at: cell)
+        }
     }
 
     private func startMomentum(velocity: CGFloat) {
@@ -371,6 +408,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         accessoryBar.onText = { [weak self] text in self?.sendFromAccessory(text) }
         accessoryBar.onPaste = { [weak self] in self?.pasteFromClipboard() }
         accessoryBar.onCopy = { [weak self] in self?.copySelection() }
+        accessoryBar.onAttachImages = { [weak self] in self?.onPickImages?() }
+        accessoryBar.setCanAttachImages(true)
         accessoryBar.onModifierToggle = { [weak self] armed in self?.controller.setModifierArmed(armed) }
         accessoryBar.onModifierChange = { [weak self] modifier in self?.controller.selectModifier(modifier) }
         accessoryBar.onKeyboardToggle = { [weak self] in self?.toggleSoftKeyboard() }
@@ -386,7 +425,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         scrollView.addGestureRecognizer(viewportPanGesture)
         scrollView.panGestureRecognizer.require(toFail: viewportPanGesture)
 
-        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
 
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
@@ -396,6 +435,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         let menu = UIEditMenuInteraction(delegate: self)
         addInteraction(menu)
         editMenu = menu
+
+        addInteraction(UIDropInteraction(delegate: self))
     }
 
     private func applyTheme() {
@@ -404,10 +445,6 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         backgroundColor = background
         scrollView.backgroundColor = background
         keyboardOcclusionView.backgroundColor = background
-        accessoryBar.applyTheme(
-            background: background,
-            foreground: UIColor(rgb: theme.foreground)
-        )
     }
 
     private func applyFont() {
@@ -451,6 +488,8 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
             columnCount = Int(screen.columns)
         }
         liveHistoryRows = screen.historyRows
+        mouseTracking = screen.mouseTracking
+        readsScrolling = screen.readsScrolling
         cursorFrame = metrics.cellRect(
             row: Int(screen.cursor.row),
             column: min(Int(screen.cursor.column), max(columnCount - 1, 0))
@@ -543,7 +582,7 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     }
 
     private func prefetchHistory() {
-        guard displayedHistory == nil, liveHistoryRows > 0 else { return }
+        guard displayedHistory == nil, liveHistoryRows > 0, !readsScrolling else { return }
         controller.prefetchHistory()
     }
 
@@ -621,7 +660,15 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
     }
 
     private func pasteFromClipboard() {
-        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        let pasteboard = UIPasteboard.general
+        if pasteboard.hasImages {
+            selection = nil
+            input.resetBuffer()
+            let providers = pasteboard.itemProviders
+            controller.sendImages { await TerminalImageLoader.images(from: providers) }
+            return
+        }
+        guard let text = pasteboard.string, !text.isEmpty else { return }
         selection = nil
         input.resetBuffer()
         controller.paste(text)
@@ -651,12 +698,15 @@ final class TerminalSurfaceView: UIView, UIScrollViewDelegate, UIGestureRecogniz
         return TerminalCellPosition(row: row, column: column)
     }
 
-    @objc private func handleTap() {
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         editMenu?.dismissMenu()
         selection = nil
-        if !input.isFirstResponder {
-            input.becomeFirstResponder()
+        if mouseTracking, displayedHistory == nil, let cell = cell(at: gesture.location(in: self)) {
+            controller.click(at: cell)
+            return
         }
+        guard !input.isFirstResponder else { return }
+        input.becomeFirstResponder()
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -744,6 +794,21 @@ extension TerminalSurfaceView: UIEditMenuInteractionDelegate {
             self?.copySelection()
         }
         return UIMenu(children: [copy])
+    }
+}
+
+extension TerminalSurfaceView: UIDropInteractionDelegate {
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
+        controller.isLive && session.hasItemsConforming(toTypeIdentifiers: [UTType.image.identifier])
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
+        UIDropProposal(operation: .copy)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+        let providers = session.items.map(\.itemProvider)
+        controller.sendImages { await TerminalImageLoader.images(from: providers) }
     }
 }
 

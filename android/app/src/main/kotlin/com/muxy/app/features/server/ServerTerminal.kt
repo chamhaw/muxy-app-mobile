@@ -3,6 +3,7 @@ package com.muxy.app.features.server
 import com.muxy.app.features.server.terminal.SdkTerminalSource
 import com.muxy.app.features.terminal.TerminalController
 import com.muxy.app.features.terminal.TerminalGridSize
+import com.muxy.app.models.DisplayPath
 import com.muxy.app.networking.server.ServerFailure
 import com.muxy.app.networking.server.ServerTerminalChannel
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +33,8 @@ class ServerTerminal(
     sessionId: ULong?,
     private val server: ServerController,
     scope: CoroutineScope,
+    directory: String = "",
+    title: String? = null,
 ) {
     val id: UUID = UUID.randomUUID()
 
@@ -42,14 +45,16 @@ class ServerTerminal(
         private set
 
     private val mutablePhase = MutableStateFlow<ServerTerminalPhase>(ServerTerminalPhase.Waiting)
-    private val mutableTitle = MutableStateFlow(defaultTitle(sessionId))
+    private val mutableDirectory = MutableStateFlow(directory)
+    private val mutableTitle = MutableStateFlow(shownTitle(title, sessionId, directory))
     private val mutableHasScreen = MutableStateFlow(false)
 
     val phase: StateFlow<ServerTerminalPhase> = mutablePhase.asStateFlow()
     val title: StateFlow<String> = mutableTitle.asStateFlow()
+    val directory: StateFlow<String> = mutableDirectory.asStateFlow()
     val hasScreen: StateFlow<Boolean> = mutableHasScreen.asStateFlow()
 
-    val source = SdkTerminalSource(scope) { server.viewportDidChange(this) }
+    val source = SdkTerminalSource(scope, serverName = { server.serverName }) { server.viewportDidChange(this) }
     val controller = TerminalController(source, scope)
 
     val viewportSize: TerminalGridSize?
@@ -64,12 +69,19 @@ class ServerTerminal(
 
     fun metadataDidChange() {
         source.metadataDidChange()
-        updateTitle()
+        updateDirectory()
     }
 
-    fun assign(sessionId: ULong) {
+    fun assign(
+        sessionId: ULong,
+        title: String,
+    ) {
         this.sessionId = sessionId
-        mutableTitle.value = defaultTitle(sessionId)
+        retitle(title)
+    }
+
+    fun retitle(title: String) {
+        mutableTitle.value = shownTitle(title, sessionId, mutableDirectory.value)
     }
 
     fun markCreating() {
@@ -84,7 +96,7 @@ class ServerTerminal(
         mutablePhase.value = ServerTerminalPhase.Live
         source.attach(channel)
         mutableHasScreen.value = true
-        updateTitle()
+        updateDirectory()
     }
 
     fun releaseChannel(): ServerTerminalChannel? {
@@ -135,18 +147,21 @@ class ServerTerminal(
         return released
     }
 
-    private fun updateTitle() {
+    private fun updateDirectory() {
         val screen = source.screen ?: return
-        val programTitle = screen.title.trim()
-        if (programTitle.isNotEmpty()) {
-            mutableTitle.value = programTitle
-            return
-        }
-        val folder = screen.directory.trimEnd('/').substringAfterLast('/')
-        mutableTitle.value = folder.ifEmpty { defaultTitle(sessionId) }
+        if (screen.directory.isNotEmpty()) mutableDirectory.value = screen.directory
     }
 
     private companion object {
-        fun defaultTitle(sessionId: ULong?): String = sessionId?.let { "Terminal $it" } ?: "New Terminal"
+        fun shownTitle(
+            title: String?,
+            sessionId: ULong?,
+            directory: String,
+        ): String = title?.ifEmpty { null } ?: defaultTitle(sessionId, directory)
+
+        fun defaultTitle(
+            sessionId: ULong?,
+            directory: String,
+        ): String = DisplayPath.folderName(directory).ifEmpty { sessionId?.let { "Terminal $it" } ?: "New Terminal" }
     }
 }

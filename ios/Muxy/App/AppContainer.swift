@@ -1,4 +1,6 @@
 import Foundation
+import MuxyMobile
+import OSLog
 import UIKit
 
 @MainActor
@@ -12,10 +14,12 @@ final class AppContainer {
     let settings: AppSettings
     let credentials: CredentialStore
     let directory: ServerDirectory
+    let push: PushCenter
 
     private let workspaceSelectionStore: WorkspaceSelectionStore
     private let makeBrowser: @MainActor () -> any BonjourBrowsing
     private let serverPairing: ServerPairingService
+    private let demoBackend = DemoBackend()
 
     init(
         connectionStore: ConnectionStore = UserDefaultsConnectionStore(),
@@ -28,7 +32,8 @@ final class AppContainer {
         makeBrowser: @escaping @MainActor () -> any BonjourBrowsing = { BonjourBrowser() },
         credentials: CredentialStore = KeychainCredentialStore(),
         serverPairing: ServerPairingService = SDKPairingService(),
-        serverConnector: ServerConnector = SDKServerConnector()
+        serverConnector: ServerConnector = SDKServerConnector(),
+        push: PushCenter
     ) {
         self.connectionStore = connectionStore
         self.keychain = keychain
@@ -40,10 +45,20 @@ final class AppContainer {
         self.makeBrowser = makeBrowser
         self.credentials = credentials
         self.serverPairing = serverPairing
-        directory = ServerDirectory(credentials: credentials, connector: serverConnector, connections: connectionStore, keychain: keychain)
+        self.push = push
+        let directory = ServerDirectory(
+            credentials: credentials,
+            connector: serverConnector,
+            connections: connectionStore,
+            keychain: keychain,
+            push: push
+        )
+        self.directory = directory
+        push.contextDidChange = { [weak directory] in directory?.pushContextDidChange() }
         let connectionManager = ConnectionManager(
             makeTransport: { url in WebSocketTransport(url: url) },
-            pairingService: pairingService
+            pairingService: pairingService,
+            demoBackend: demoBackend
         )
         self.connectionManager = connectionManager
     }
@@ -52,11 +67,25 @@ final class AppContainer {
         let connections = UserDefaultsConnectionStore()
         let keychain = KeychainTokenStore()
         LegacyConnectionImporter(storage: IOSLegacyStorage(), connections: connections, keychain: keychain).run()
-        return AppContainer(connectionStore: connections, keychain: keychain)
+        return AppContainer(connectionStore: connections, keychain: keychain, push: .live())
+    }
+
+    func syncPushServers() {
+        do {
+            push.syncServers(try credentials.all())
+        } catch {
+            Log.push.error("Reading paired computers for notifications failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func makeConnectionsListViewModel() -> ConnectionsListViewModel {
         ConnectionsListViewModel(store: connectionStore, keychain: keychain, credentials: credentials, directory: directory)
+    }
+
+    func makeTabsHomeViewModel() -> TabsHomeViewModel {
+        TabsHomeViewModel(store: connectionStore, keychain: keychain, directory: directory) { [demoBackend] in
+            ConnectionManager(makeTransport: { WebSocketTransport(url: $0) }, demoBackend: demoBackend)
+        }
     }
 
     func makeAddConnectionViewModel() -> AddConnectionViewModel {
@@ -96,14 +125,15 @@ final class AppContainer {
         )
     }
 
-    func makeProjectDetailViewModel(for project: Project, connection: Connection) -> ProjectDetailViewModel {
+    func makeProjectDetailViewModel(for project: Project, connection: Connection, initialTabID: UUID? = nil) -> ProjectDetailViewModel {
         let sessionStore = TerminalSessionStore(channel: connectionManager)
         return ProjectDetailViewModel(
             connection: connection,
             project: project,
             keychain: keychain,
             connectionManager: connectionManager,
-            sessionStore: sessionStore
+            sessionStore: sessionStore,
+            initialTabID: initialTabID
         )
     }
 

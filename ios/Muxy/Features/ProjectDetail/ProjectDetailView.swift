@@ -3,6 +3,7 @@ import SwiftUI
 struct ProjectDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State var viewModel: ProjectDetailViewModel
+    let requestedTabID: UUID?
     @State private var tool: ProjectTool?
 
     var body: some View {
@@ -32,6 +33,9 @@ struct ProjectDetailView: View {
                 }
             }
         }
+        .onChange(of: requestedTabID) { _, tabID in
+            tabID.map(viewModel.select(tabID:))
+        }
         .task { await viewModel.connect() }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -60,7 +64,7 @@ struct ProjectDetailView: View {
         if tab.kind == .terminal, let session = viewModel.terminalSession(for: tab) {
             TerminalTabView(session: session)
         } else {
-            UnsupportedTabView(title: tab.title)
+            UnsupportedTabView(title: tab.displayTitle)
         }
     }
 }

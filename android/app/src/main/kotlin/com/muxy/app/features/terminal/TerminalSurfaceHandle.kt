@@ -1,5 +1,6 @@
 package com.muxy.app.features.terminal
 
+import android.net.Uri
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -17,6 +18,15 @@ class TerminalSurfaceHandle(
         private set
 
     var keyboardVisible = false
+
+    var onPickImages: (() -> Unit)? = null
+
+    var occlusionSpacing = 0f
+        set(value) {
+            if (field == value) return
+            field = value
+            updateOcclusion()
+        }
 
     var view: TerminalSurfaceView? = null
         private set
@@ -63,6 +73,14 @@ class TerminalSurfaceHandle(
         view?.copySelection()
     }
 
+    override fun attachImages() {
+        onPickImages?.invoke()
+    }
+
+    fun sendImages(uris: List<Uri>) {
+        view?.sendImages(uris)
+    }
+
     override fun toggleModifier() {
         controller.toggleModifier()
     }
@@ -78,6 +96,6 @@ class TerminalSurfaceHandle(
     private fun updateOcclusion() {
         val bottom = surfaceBottom ?: return
         val top = barTop ?: return
-        view?.setKeyboardOcclusion((bottom - top).coerceAtLeast(0f))
+        view?.setKeyboardOcclusion((bottom - top + occlusionSpacing).coerceAtLeast(0f))
     }
 }

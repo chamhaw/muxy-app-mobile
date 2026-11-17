@@ -4,44 +4,53 @@ struct RootView: View {
     let container: AppContainer
 
     @AppStorage("muxy.hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var connectionsViewModel: ConnectionsListViewModel
+    @State private var tabsViewModel: TabsHomeViewModel
     @State private var path: [AppRoute] = []
     @State private var addRequest: AddConnectionRequest?
     @State private var editingConnection: Connection?
     @State private var isShowingSettings = false
+    @State private var homeResetID = UUID()
 
     init(container: AppContainer) {
         self.container = container
         _connectionsViewModel = State(initialValue: container.makeConnectionsListViewModel())
+        _tabsViewModel = State(initialValue: container.makeTabsHomeViewModel())
     }
 
     var body: some View {
-        let theme = AppTheme(palette: container.settings.themePalette)
+        let theme = AppTheme(isDark: colorScheme == .dark, terminalPalette: container.settings.themePalette)
         themedContent
             .environment(\.appTheme, theme)
             .tint(theme.accent)
             .themedWindow(theme)
             .onOpenURL(perform: open)
             .onChange(of: scenePhase) { _, phase in sceneDidChange(phase) }
+            .onChange(of: container.push.openRequest, initial: true) { _, request in openPush(request) }
     }
 
     private var themedContent: some View {
         Group {
             if hasCompletedOnboarding {
-                NavigationStack(path: $path) {
-                    ConnectionsListView(
-                        viewModel: connectionsViewModel,
-                        onSelect: navigate(to:),
-                        onEdit: { editingConnection = $0 },
-                        onAddConnection: { addRequest = AddConnectionRequest() },
-                        onSettings: { isShowingSettings = true }
-                    )
-                    .navigationDestination(for: AppRoute.self) { route in
+                if isSplit {
+                    SplitRootView(path: $path, sidebar: { home }) { route in
                         destination(for: route)
+                            .toolbar(.visible, for: .navigationBar)
                     }
+                    .onChange(of: path) { _, newPath in pathDidChange(newPath) }
+                } else {
+                    NavigationStack(path: $path) {
+                        home
+                            .navigationDestination(for: AppRoute.self) { route in
+                                destination(for: route)
+                                    .toolbar(.visible, for: .navigationBar)
+                            }
+                    }
+                    .onChange(of: path) { _, newPath in pathDidChange(newPath) }
                 }
-                .onChange(of: path) { _, newPath in pathDidChange(newPath) }
             } else {
                 OnboardingView(
                     onSkip: completeOnboarding,
@@ -51,24 +60,48 @@ struct RootView: View {
         }
         .onAppear { applyDemoMode() }
         .onChange(of: container.settings.demoMode) { _, _ in applyDemoMode() }
-        .sheet(item: $addRequest, onDismiss: { connectionsViewModel.load() }) { request in
+        .sheet(item: $addRequest, onDismiss: reloadConnections) { request in
             AddConnectionView(
                 viewModel: container.makeAddConnectionViewModel(),
                 pairingCode: request.pairingCode,
                 onAdded: didAdd
             )
+            .formModalPresentation()
         }
-        .sheet(item: $editingConnection, onDismiss: { connectionsViewModel.load() }) { connection in
+        .sheet(item: $editingConnection, onDismiss: reloadConnections) { connection in
             EditConnectionView(viewModel: container.makeEditConnectionViewModel(for: connection)) {
                 editingConnection = nil
-                connectionsViewModel.load()
+                reloadConnections()
             }
+            .formModalPresentation()
         }
         .sheet(isPresented: $isShowingSettings) {
-            SettingsView(settings: container.settings) {
+            SettingsView(settings: container.settings, push: container.push) {
                 isShowingSettings = false
             }
+            .formModalPresentation()
         }
+    }
+
+    private var home: some View {
+        TabsHomeView(
+            viewModel: tabsViewModel,
+            push: container.push,
+            resetID: homeResetID,
+            onOpen: show(_:),
+            onOpenDevice: navigate(to:),
+            onEdit: { editingConnection = $0 },
+            onDelete: { connection in
+                connectionsViewModel.delete(connection)
+                tabsViewModel.load()
+            },
+            onAddDevice: { addRequest = AddConnectionRequest() },
+            onSettings: { isShowingSettings = true }
+        )
+    }
+
+    private var isSplit: Bool {
+        horizontalSizeClass == .regular
     }
 
     @ViewBuilder
@@ -81,8 +114,11 @@ struct RootView: View {
                     path.append(AppRoute.projectDetail(connection: connection, project: project))
                 }
             )
-        case let .projectDetail(connection, project):
-            ProjectDetailView(viewModel: container.makeProjectDetailViewModel(for: project, connection: connection))
+        case let .projectDetail(connection, project, tabID):
+            ProjectDetailView(
+                viewModel: container.makeProjectDetailViewModel(for: project, connection: connection, initialTabID: tabID),
+                requestedTabID: tabID
+            )
         case let .serverProjects(connection):
             ServerProjectsView(
                 connection: connection,
@@ -91,11 +127,22 @@ struct RootView: View {
                     path.append(AppRoute.serverProject(connection: connection, projectID: projectID))
                 }
             )
-        case let .serverProject(connection, projectID):
+        case let .serverProject(connection, projectID, tabID):
             ServerProjectDetailView(
                 connection: connection,
                 server: serverController(for: connection),
                 projectID: projectID,
+                initialTabID: tabID,
+                settings: container.settings,
+                onOpenProject: { openedProjectID in
+                    path = path.opening(.serverProject(connection: connection, projectID: openedProjectID))
+                }
+            )
+        case let .serverSession(connection, target):
+            ServerSessionDetailView(
+                connection: connection,
+                server: serverController(for: connection),
+                target: target,
                 settings: container.settings,
                 onOpenProject: { openedProjectID in
                     path = path.opening(.serverProject(connection: connection, projectID: openedProjectID))
@@ -113,20 +160,34 @@ struct RootView: View {
     private func navigate(to connection: Connection) {
         switch connection.kind {
         case .device:
-            path.append(AppRoute.projects(connection))
+            show(.projects(connection))
         case .server:
-            path.append(AppRoute.serverProjects(connection))
+            show(.serverProjects(connection))
         case .ssh:
-            path.append(AppRoute.sshTerminal(connection))
+            show(.sshTerminal(connection))
         }
     }
 
-    private func didAdd(_ connection: Connection) {
-        addRequest = nil
-        if let serverID = connection.serverRouteID {
-            container.directory.credentialDidChange(for: serverID)
+    private func show(_ route: AppRoute) {
+        guard isSplit else {
+            path.append(route)
+            return
         }
-        navigate(to: connection)
+        path = [route]
+    }
+
+    private func didAdd(_ connection: Connection) {
+        Task {
+            await container.connectionManager.disconnect()
+            addRequest = nil
+            if let serverID = connection.serverRouteID {
+                container.directory.credentialDidChange(for: serverID)
+            }
+            path.removeAll()
+            reloadConnections()
+            guard connection.kind == .server, connection.serverTransport != .ssh else { return }
+            await container.push.requestPermissionIfUndetermined()
+        }
     }
 
     private func pathDidChange(_ newPath: [AppRoute]) {
@@ -139,6 +200,7 @@ struct RootView: View {
         switch phase {
         case .active:
             container.directory.setForeground(true)
+            Task { await container.push.refreshAuthorization() }
         case .background:
             container.directory.setForeground(false)
         case .inactive:
@@ -155,6 +217,22 @@ struct RootView: View {
         addRequest = AddConnectionRequest(pairingCode: url.absoluteString)
     }
 
+    private func openPush(_ request: PushOpenRequest?) {
+        guard let request else { return }
+        container.push.consume(request)
+        hasCompletedOnboarding = true
+        isShowingSettings = false
+        editingConnection = nil
+        addRequest = nil
+        homeResetID = UUID()
+        guard case let .session(target) = request.destination,
+              let route = AppRoute.opening(target, among: container.connectionStore.load()) else {
+            path = []
+            return
+        }
+        path = [route]
+    }
+
     private func completeOnboarding() {
         hasCompletedOnboarding = true
     }
@@ -166,7 +244,13 @@ struct RootView: View {
 
     private func applyDemoMode() {
         DemoConnection.apply(enabled: container.settings.demoMode, store: container.connectionStore, keychain: container.keychain)
+        reloadConnections()
+    }
+
+    private func reloadConnections() {
         connectionsViewModel.load()
+        tabsViewModel.load()
+        container.syncPushServers()
     }
 }
 

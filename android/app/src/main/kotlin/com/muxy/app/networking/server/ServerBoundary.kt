@@ -1,11 +1,13 @@
 package com.muxy.app.networking.server
 
+import uniffi.muxy_mobile.Activity
 import uniffi.muxy_mobile.ConnectionEvent
 import uniffi.muxy_mobile.Key
 import uniffi.muxy_mobile.Line
 import uniffi.muxy_mobile.Modifiers
 import uniffi.muxy_mobile.MouseButton
 import uniffi.muxy_mobile.PairingLink
+import uniffi.muxy_mobile.PushRegistration
 import uniffi.muxy_mobile.Screen
 import uniffi.muxy_mobile.ScrollDirection
 import uniffi.muxy_mobile.ServerCredential
@@ -23,9 +25,13 @@ interface ServerConnector {
 interface ServerConnection {
     val serverVersion: String
 
+    val supportsPushNotifications: Boolean
+
     suspend fun projects(): List<ServerProject>
 
     suspend fun sessions(projectId: String): List<Session>
+
+    suspend fun findSession(sessionId: ULong): Session?
 
     suspend fun createSession(
         projectId: String,
@@ -34,6 +40,14 @@ interface ServerConnection {
     ): Session
 
     suspend fun endSession(sessionId: ULong)
+
+    suspend fun activity(): Activity
+
+    suspend fun acknowledgeActivity(eventIds: List<ULong>)
+
+    suspend fun registerPush(token: String): PushRegistration
+
+    suspend fun unregisterPush()
 
     suspend fun attach(
         sessionId: ULong,
@@ -61,6 +75,13 @@ interface ServerTerminalChannel : AutoCloseable {
     )
 
     fun paste(text: String)
+
+    suspend fun upload(
+        name: String,
+        bytes: ByteArray,
+    ): String
+
+    fun pastePaths(paths: List<String>)
 
     fun click(
         button: MouseButton,

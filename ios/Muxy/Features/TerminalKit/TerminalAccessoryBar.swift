@@ -8,7 +8,7 @@ final class TerminalAccessoryModel: ObservableObject {
     @Published var activeModifier: TerminalModifier = .ctrl
     @Published var keyboardVisible: Bool = true
     @Published var canCopySelection: Bool = false
-    @Published var foreground: SwiftUI.Color = .primary
+    @Published var canAttachImages: Bool = false
 
     var onKey: ((TerminalKey) -> Void)?
     var onText: ((String) -> Void)?
@@ -17,6 +17,7 @@ final class TerminalAccessoryModel: ObservableObject {
     var onKeyboardToggle: (() -> Void)?
     var onPaste: (() -> Void)?
     var onCopy: (() -> Void)?
+    var onAttachImages: (() -> Void)?
 
     func setModifierArmed(_ armed: Bool) {
         guard modifierArmed != armed else { return }
@@ -82,6 +83,11 @@ final class TerminalAccessoryBar: UIInputView {
         set { model.onCopy = newValue }
     }
 
+    var onAttachImages: (() -> Void)? {
+        get { model.onAttachImages }
+        set { model.onAttachImages = newValue }
+    }
+
     var modifierArmed: Bool { model.modifierArmed }
     var activeModifier: TerminalModifier { model.activeModifier }
     var canCopySelection: Bool { model.canCopySelection }
@@ -94,10 +100,8 @@ final class TerminalAccessoryBar: UIInputView {
         model.canCopySelection = enabled
     }
 
-    func applyTheme(background: UIColor, foreground: UIColor) {
-        backgroundColor = background
-        backdrop.backgroundColor = background
-        model.foreground = SwiftUI.Color(foreground)
+    func setCanAttachImages(_ enabled: Bool) {
+        model.canAttachImages = enabled
     }
 
     func syncModifierArmed(_ armed: Bool) {
@@ -108,9 +112,28 @@ final class TerminalAccessoryBar: UIInputView {
         model.syncActiveModifier(modifier)
     }
 
+    func alignContent(toPageOf view: UIView) {
+        guard let space = view.window?.windowScene?.screen.coordinateSpace else { return }
+        let page = view.convert(view.bounds, to: space).insetBy(dx: -TerminalViewportState.pageOutset, dy: 0)
+        guard page != alignedPage else { return }
+        alignedPage = page
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        applyContentInsets()
+        super.layoutSubviews()
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        hostingController.view.frame.contains(point)
+    }
+
     private let model = TerminalAccessoryModel()
     private let hostingController: UIHostingController<TerminalAccessoryView>
-    private let backdrop = UIView()
+    private var alignedPage: CGRect?
+    private lazy var contentLeading = hostingController.view.leadingAnchor.constraint(equalTo: leadingAnchor)
+    private lazy var contentTrailing = hostingController.view.trailingAnchor.constraint(equalTo: trailingAnchor)
 
     init() {
         hostingController = UIHostingController(rootView: TerminalAccessoryView(model: model))
@@ -129,29 +152,33 @@ final class TerminalAccessoryBar: UIInputView {
     }
 
     private func setupHostingView() {
-        backdrop.frame = bounds
-        backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        backdrop.isUserInteractionEnabled = false
-        addSubview(backdrop)
+        backgroundColor = .clear
 
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         hostingController.view.backgroundColor = .clear
         hostingController.sizingOptions = .preferredContentSize
         addSubview(hostingController.view)
         NSLayoutConstraint.activate([
-            hostingController.view.leadingAnchor.constraint(equalTo: leadingAnchor),
-            hostingController.view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentLeading,
+            contentTrailing,
             hostingController.view.topAnchor.constraint(equalTo: topAnchor),
             hostingController.view.bottomAnchor.constraint(equalTo: bottomAnchor),
             heightAnchor.constraint(equalToConstant: 72),
         ])
+    }
+
+    private func applyContentInsets() {
+        guard let page = alignedPage, let space = window?.windowScene?.screen.coordinateSpace else { return }
+        let frame = convert(bounds, to: space)
+        contentLeading.constant = max(0, page.minX - frame.minX)
+        contentTrailing.constant = -max(0, frame.maxX - page.maxX)
     }
 }
 
 struct TerminalAccessoryView: View {
     @ObservedObject var model: TerminalAccessoryModel
 
-    private var fg: SwiftUI.Color { model.foreground }
+    private var fg: SwiftUI.Color { .primary }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -162,7 +189,7 @@ struct TerminalAccessoryView: View {
                 model.onKey?(key)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, PageMargin.horizontal)
         .padding(.vertical, 10)
     }
 
@@ -174,6 +201,9 @@ struct TerminalAccessoryView: View {
                 key("tab", action: { model.onKey?(.tab) })
                 actionIcon("doc.on.clipboard", label: "Paste", action: { model.onPaste?() })
                 actionIcon("doc.on.doc", label: "Copy", enabled: model.canCopySelection, action: { model.onCopy?() })
+                if model.canAttachImages {
+                    actionIcon("photo", label: "Attach Image", action: { model.onAttachImages?() })
+                }
                 symbol("~")
                 symbol("|")
                 symbol("/")
@@ -432,6 +462,7 @@ final class ModifierKeyHostView: UIView {
 
         didCommitSelection = false
         let picker = ModifierPickerView(active: activeModifier, fg: fgColor)
+        picker.overrideUserInterfaceStyle = traitCollection.userInterfaceStyle
         picker.translatesAutoresizingMaskIntoConstraints = false
         window.addSubview(picker)
 
@@ -490,7 +521,7 @@ final class ModifierKeyHostView: UIView {
 final class ModifierPickerView: UIView {
     private let rowHeight: CGFloat = 44
     private let horizontalPadding: CGFloat = 16
-    private let verticalPadding: CGFloat = 6
+    private let verticalPadding = SurfaceCorner.popoverPadding
     private let pickerWidth: CGFloat = 180
     private let arrowHeight: CGFloat = 8
 
@@ -522,16 +553,16 @@ final class ModifierPickerView: UIView {
 
     private func setupViews() {
         containerView.translatesAutoresizingMaskIntoConstraints = false
-        containerView.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        containerView.layer.cornerRadius = 18
+        containerView.backgroundColor = UIColor.secondarySystemGroupedBackground.withAlphaComponent(0.9)
+        containerView.layer.cornerRadius = SurfaceCorner.popover
         containerView.layer.cornerCurve = .continuous
         containerView.layer.borderWidth = 0.5
         containerView.layer.borderColor = fgColor.withAlphaComponent(0.12).cgColor
         addSubview(containerView)
 
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
         blur.translatesAutoresizingMaskIntoConstraints = false
-        blur.layer.cornerRadius = 18
+        blur.layer.cornerRadius = SurfaceCorner.popover
         blur.layer.cornerCurve = .continuous
         blur.clipsToBounds = true
         containerView.insertSubview(blur, at: 0)
@@ -596,7 +627,7 @@ final class ModifierPickerView: UIView {
         ctx.addLine(to: CGPoint(x: midX + arrowWidth / 2, y: topY))
         ctx.addLine(to: CGPoint(x: midX, y: rect.maxY))
         ctx.closePath()
-        ctx.setFillColor(UIColor.black.withAlphaComponent(0.7).cgColor)
+        ctx.setFillColor(UIColor.secondarySystemGroupedBackground.resolvedColor(with: traitCollection).withAlphaComponent(0.9).cgColor)
         ctx.fillPath()
     }
 
@@ -650,8 +681,8 @@ final class ModifierPickerRow: UIView {
         NSLayoutConstraint.activate([
             highlight.topAnchor.constraint(equalTo: topAnchor),
             highlight.bottomAnchor.constraint(equalTo: bottomAnchor),
-            highlight.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            highlight.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            highlight.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SurfaceCorner.popoverPadding),
+            highlight.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SurfaceCorner.popoverPadding),
             glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             glyphLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             glyphLabel.widthAnchor.constraint(equalToConstant: 20),
@@ -662,7 +693,7 @@ final class ModifierPickerRow: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        highlight.layer.cornerRadius = 10
+        highlight.layer.cornerRadius = SurfaceCorner.popoverRow
         highlight.layer.cornerCurve = .continuous
     }
 

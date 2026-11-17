@@ -184,13 +184,66 @@ struct TerminalAttachmentTests {
         #expect(tab.notice != nil)
     }
 
-    @Test func theTitleFollowsTheProgram() async throws {
+    @Test func theTitleFollowsTheServer() async throws {
+        let connection = FakeServerConnection(sessions: [Fixtures.session(1)])
+        let (controller, connector) = await connectedController(connection)
+        let model = controller.projectModel(for: "muxy")
+        let tab = try #require(await visibleTab(in: model, session: 1))
+        #expect(tab.title == "muxy")
+        connector.emit(.titleChanged(sessionId: 1, title: "lazygit"))
+        await settle { tab.title == "lazygit" }
+        #expect(tab.title == "lazygit")
+    }
+
+    @Test func tapsAndScrollingReachTheProgram() async throws {
         let connection = FakeServerConnection(sessions: [Fixtures.session(1)])
         let (controller, _) = await connectedController(connection)
         let model = controller.projectModel(for: "muxy")
         let tab = try #require(await visibleTab(in: model, session: 1))
-        #expect(tab.title == "Terminal 1")
         await settle { tab.isLive }
-        #expect(tab.title == "shell 1")
+
+        tab.scroll(.down, at: TerminalCellPosition(row: 3, column: 7))
+        tab.scroll(.up, at: TerminalCellPosition(row: 4, column: 2))
+        tab.click(at: TerminalCellPosition(row: 5, column: 9))
+
+        #expect(connection.channel(for: 1)?.sent == [
+            "scroll:down:3:7",
+            "scroll:up:4:2",
+            "click:left:5:9",
+        ])
+    }
+
+    @Test func aProgramReadingTheMouseLeavesHistory() async throws {
+        let connection = FakeServerConnection(sessions: [Fixtures.session(1)])
+        let (controller, connector) = await connectedController(connection)
+        let model = controller.projectModel(for: "muxy")
+        let tab = try #require(await visibleTab(in: model, session: 1))
+        await settle { tab.isLive }
+        _ = await tab.enterHistory()
+        #expect(tab.mode == .history)
+
+        connection.channel(for: 1)?.update(screen: Fixtures.screen(mouseTracking: true))
+        connector.emit(.metadataChanged(sessionId: 1))
+        await settle { tab.mode == .live }
+
+        #expect(tab.mode == .live)
+        #expect(tab.isFollowing)
+    }
+
+    @Test func historyStaysOpenWhileTheProgramIgnoresTheMouse() async throws {
+        let connection = FakeServerConnection(sessions: [Fixtures.session(1)])
+        let (controller, connector) = await connectedController(connection)
+        let model = controller.projectModel(for: "muxy")
+        let tab = try #require(await visibleTab(in: model, session: 1))
+        await settle { tab.isLive }
+        _ = await tab.enterHistory()
+
+        connection.channel(for: 1)?.update(screen: Fixtures.screen(title: "vim"))
+        connector.emit(.metadataChanged(sessionId: 1))
+        connector.emit(.titleChanged(sessionId: 1, title: "vim"))
+        await settle { tab.title == "vim" }
+
+        #expect(tab.title == "vim")
+        #expect(tab.mode == .history)
     }
 }

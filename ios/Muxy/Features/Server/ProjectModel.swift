@@ -10,10 +10,13 @@ final class ProjectModel {
     private(set) var tabs: [TerminalController] = []
     private(set) var selectedTabID: UUID?
     private(set) var hasLoadedSessions = false
+    private(set) var sessionsLoadFailed = false
 
     @ObservationIgnored private(set) var isVisible = false
+    @ObservationIgnored var isListed = false
     @ObservationIgnored private weak var server: ServerController?
     @ObservationIgnored private var endedSessionIDs: Set<UInt64> = []
+    @ObservationIgnored private var sessionsRevision = 0
 
     init(projectID: String, server: ServerController) {
         self.projectID = projectID
@@ -25,7 +28,7 @@ final class ProjectModel {
     }
 
     var needsSessions: Bool {
-        isVisible
+        isVisible || isListed
     }
 
     func setVisible(_ visible: Bool) {
@@ -36,11 +39,13 @@ final class ProjectModel {
         server?.refreshSessions(of: self)
     }
 
-    func createTab() {
-        guard let server else { return }
-        let tab = TerminalController(projectID: projectID, sessionID: nil, server: server)
+    @discardableResult
+    func createTab() -> TerminalController? {
+        guard let server else { return nil }
+        let tab = TerminalController(projectID: projectID, sessionID: nil, directory: server.project(for: projectID)?.directory ?? "", server: server)
         tabs.append(tab)
         select(tab)
+        return tab
     }
 
     func select(_ tab: TerminalController) {
@@ -63,6 +68,17 @@ final class ProjectModel {
         }
     }
 
+    func openTab(for session: Session) -> TerminalController? {
+        if let existing = tabs.first(where: { $0.sessionID == session.id }) {
+            select(existing)
+            return existing
+        }
+        endedSessionIDs.remove(session.id)
+        guard let tab = makeTab(for: session) else { return nil }
+        select(tab)
+        return tab
+    }
+
     func sessionDidEnd(_ sessionID: UInt64) {
         endedSessionIDs.insert(sessionID)
         guard let tab = tabs.first(where: { $0.sessionID == sessionID }) else { return }
@@ -77,18 +93,25 @@ final class ProjectModel {
     }
 
     func refreshSessions(using connection: any ServerConnection) async {
+        sessionsRevision += 1
+        let revision = sessionsRevision
         let knownBeforeRequest = Set(tabs.compactMap(\.sessionID))
         do {
             let listed = try await connection.sessions(projectId: projectID)
+            guard revision == sessionsRevision, server?.connection === connection, !Task.isCancelled else { return }
             let live = listed.filter { $0.status == .live || $0.status == .starting }
             hasLoadedSessions = true
+            sessionsLoadFailed = false
             reconcile(with: live, knownBeforeRequest: knownBeforeRequest)
         } catch {
+            guard revision == sessionsRevision, server?.connection === connection, !Task.isCancelled else { return }
+            sessionsLoadFailed = true
             Log.connection.error("Loading sessions failed: \(String(describing: ServerFailure(error)), privacy: .public)")
         }
     }
 
     func removeAllTabs() {
+        sessionsRevision += 1
         tabs.forEach(retire)
         tabs.removeAll()
         selectedTabID = nil
@@ -99,6 +122,7 @@ final class ProjectModel {
         let liveIDs = Set(sessions.map(\.id))
         endedSessionIDs.formIntersection(liveIDs)
         pruneEnded(knownBeforeRequest.subtracting(liveIDs))
+        retitle(with: sessions)
         appendNew(sessions)
         guard selectedTab == nil, let first = tabs.first else { return }
         select(first)
@@ -112,17 +136,37 @@ final class ProjectModel {
         }
     }
 
+    private func retitle(with sessions: [Session]) {
+        let titles = Dictionary(sessions.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })
+        for tab in tabs {
+            guard let sessionID = tab.sessionID, let title = titles[sessionID] else { continue }
+            tab.retitle(title)
+        }
+    }
+
     private func appendNew(_ sessions: [Session]) {
-        guard let server else { return }
         let open = Set(tabs.compactMap(\.sessionID))
         let new = sessions
             .filter { !open.contains($0.id) && !endedSessionIDs.contains($0.id) }
             .sorted { $0.id < $1.id }
         for session in new {
-            let tab = TerminalController(projectID: projectID, sessionID: session.id, server: server)
-            server.register(tab, sessionID: session.id)
-            tabs.append(tab)
+            makeTab(for: session)
         }
+    }
+
+    @discardableResult
+    private func makeTab(for session: Session) -> TerminalController? {
+        guard let server else { return nil }
+        let tab = TerminalController(
+            projectID: projectID,
+            sessionID: session.id,
+            directory: session.directory,
+            title: session.title,
+            server: server
+        )
+        server.register(tab, sessionID: session.id, title: session.title)
+        tabs.append(tab)
+        return tab
     }
 
     private func remove(_ tab: TerminalController) {

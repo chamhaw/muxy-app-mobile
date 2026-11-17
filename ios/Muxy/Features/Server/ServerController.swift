@@ -1,5 +1,6 @@
 import Foundation
 import MuxyMobile
+import MuxyPush
 import Observation
 import OSLog
 
@@ -25,6 +26,8 @@ final class ServerController {
     private(set) var projects: [ServerProject] = []
     private(set) var hasLoadedProjects = false
     private(set) var projectsLoadFailed = false
+    private(set) var sessionActivity: [UInt64: TabActivity] = [:]
+    private(set) var supportsPushNotifications = false
 
     @ObservationIgnored private(set) var connection: (any ServerConnection)?
     @ObservationIgnored private let nameProvider: () -> String?
@@ -32,23 +35,30 @@ final class ServerController {
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private let attachment = AttachmentCoordinator()
     @ObservationIgnored private let fileWatches = FileWatches()
+    @ObservationIgnored private let pushRegistrar = PushRegistrar()
+    @ObservationIgnored private let sessionOpener = SessionOpener()
+    @ObservationIgnored private var pushAcknowledgements: [UInt64: Set<UInt64>] = [:]
     @ObservationIgnored private var connectionContinuations: [UUID: AsyncStream<Bool>.Continuation] = [:]
     @ObservationIgnored private var projectModels: [String: ProjectModel] = [:]
     @ObservationIgnored private var terminalsBySession: [UInt64: TerminalController] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var wantsConnection = false
+    @ObservationIgnored private var isBrowsing = false
     @ObservationIgnored private var isConnecting = false
     @ObservationIgnored private var restartPending = false
     @ObservationIgnored private var schedule: ReconnectSchedule
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private let projectsRefresh = CoalescedRefresh()
     @ObservationIgnored private let sessionsRefresh = CoalescedRefresh()
+    @ObservationIgnored private let activityRefresh = CoalescedRefresh()
+    @ObservationIgnored private var pendingEventIDs: [UInt64: [UInt64]] = [:]
 
     init(
         serverID: String,
         serverName: String,
         connector: ServerConnector,
         credentialProvider: @escaping () -> ServerCredential?,
+        pushContext: (any ServerPushContext)? = nil,
         schedule: ReconnectSchedule = ReconnectSchedule()
     ) {
         self.serverID = serverID
@@ -59,8 +69,7 @@ final class ServerController {
             return try await connector.connect(to: credential, events: events)
         }
         self.schedule = schedule
-        attachment.server = self
-        fileWatches.server = self
+        attachHelpers(pushContext: pushContext)
     }
 
     init(
@@ -68,6 +77,7 @@ final class ServerController {
         serverName: String,
         nameProvider: @escaping () -> String?,
         openConnection: @escaping (@escaping @Sendable (ConnectionEvent) -> Void) async throws -> any ServerConnection,
+        pushContext: (any ServerPushContext)? = nil,
         schedule: ReconnectSchedule = ReconnectSchedule()
     ) {
         self.serverID = serverID
@@ -75,12 +85,25 @@ final class ServerController {
         self.nameProvider = nameProvider
         self.openConnection = openConnection
         self.schedule = schedule
+        attachHelpers(pushContext: pushContext)
+    }
+
+    private func attachHelpers(pushContext: (any ServerPushContext)?) {
         attachment.server = self
         fileWatches.server = self
+        pushRegistrar.server = self
+        pushRegistrar.context = pushContext
+        sessionOpener.server = self
     }
 
     var projectRows: [ProjectRow] {
         ProjectTree.rows(from: projects)
+    }
+
+    var requestRetrySchedule: ReconnectSchedule {
+        var retries = schedule
+        retries.reset()
+        return retries
     }
 
     var isConnectionLost: Bool {
@@ -99,8 +122,21 @@ final class ServerController {
     func projectModel(for projectID: String) -> ProjectModel {
         if let existing = projectModels[projectID] { return existing }
         let model = ProjectModel(projectID: projectID, server: self)
+        model.isListed = isBrowsing
         projectModels[projectID] = model
         return model
+    }
+
+    func listedProjectModel(for projectID: String) -> ProjectModel? {
+        projectModels[projectID]
+    }
+
+    func setBrowsing(_ browsing: Bool) {
+        guard isBrowsing != browsing else { return }
+        isBrowsing = browsing
+        projectModels.values.forEach { $0.isListed = browsing }
+        guard browsing else { return }
+        prepareListedProjects()
     }
 
     func setWantsConnection(_ wants: Bool) {
@@ -140,13 +176,36 @@ final class ServerController {
         sessionDidEnd(sessionID)
     }
 
+    func activity(forSession sessionID: UInt64?) -> TabActivity {
+        sessionID.flatMap { sessionActivity[$0] } ?? .none
+    }
+
+    func acknowledgeActivity(forSession sessionID: UInt64) {
+        guard let connection, let eventIDs = pendingEventIDs.removeValue(forKey: sessionID), !eventIDs.isEmpty else { return }
+        if let current = sessionActivity[sessionID] {
+            sessionActivity[sessionID] = TabActivity(
+                state: current.state == .working ? .working : .idle,
+                provider: current.provider,
+                since: nil
+            )
+        }
+        Task { [weak self] in
+            do {
+                try await connection.acknowledgeActivity(eventIds: eventIDs)
+            } catch {
+                Log.connection.error("Acknowledging activity failed: \(String(describing: ServerFailure(error)), privacy: .public)")
+                self?.reloadActivity()
+            }
+        }
+    }
+
     func reloadProjects() {
         guard connection != nil else { return }
         projectsRefresh.request { [weak self] in await self?.loadProjects() }
     }
 
-    func register(_ terminal: TerminalController, sessionID: UInt64) {
-        terminal.assign(sessionID: sessionID)
+    func register(_ terminal: TerminalController, sessionID: UInt64, title: String) {
+        terminal.assign(sessionID: sessionID, title: title)
         terminalsBySession[sessionID] = terminal
         projectModels[terminal.projectID]?.didRegister(terminal)
     }
@@ -160,7 +219,56 @@ final class ServerController {
     }
 
     func updateVisibleTerminal() {
-        attachment.show(projectModels.values.first(where: \.isVisible)?.selectedTab)
+        let visible = visibleTerminal
+        attachment.show(visible)
+        if let sessionID = visible?.sessionID {
+            acknowledgeActivity(forSession: sessionID)
+        }
+        acknowledgePushEventsIfShown()
+    }
+
+    func terminalDidAttach(_ terminal: TerminalController) {
+        guard terminal === visibleTerminal else { return }
+        acknowledgePushEventsIfShown()
+    }
+
+    func syncPushRegistration() {
+        pushRegistrar.sync()
+    }
+
+    func unregisterPush() async {
+        await pushRegistrar.unregister()
+    }
+
+    func openSession(_ target: PushTarget) async -> SessionOpening? {
+        await sessionOpener.open(target)
+    }
+
+    func acknowledgeWhenShown(eventID: UInt64, sessionID: UInt64) {
+        pushAcknowledgements[sessionID, default: []].insert(eventID)
+        acknowledgePushEventsIfShown()
+    }
+
+    func acknowledgePushEvent(_ eventID: UInt64, sessionID: UInt64) {
+        pushRegistrar.context?.removeDeliveredNotifications(forSession: sessionID, serverID: serverID)
+        guard let connection else { return }
+        Task {
+            do {
+                try await connection.acknowledgeActivity(eventIds: [eventID])
+            } catch {
+                Log.push.error("Acknowledging a notification failed: \(String(describing: ServerFailure(error)), privacy: .public)")
+            }
+        }
+    }
+
+    private var visibleTerminal: TerminalController? {
+        projectModels.values.first(where: \.isVisible)?.selectedTab
+    }
+
+    private func acknowledgePushEventsIfShown() {
+        guard let terminal = visibleTerminal, terminal.isLive, let sessionID = terminal.sessionID,
+              let eventIDs = pushAcknowledgements.removeValue(forKey: sessionID) else { return }
+        eventIDs.forEach { acknowledgePushEvent($0, sessionID: sessionID) }
     }
 
     func viewportDidChange(of terminal: TerminalController) {
@@ -253,6 +361,8 @@ final class ServerController {
         refreshEverything()
         attachment.connectionDidOpen()
         fileWatches.connectionDidOpen()
+        supportsPushNotifications = connection.supportsPushNotifications
+        pushRegistrar.connectionDidOpen()
         announceConnection(true)
     }
 
@@ -274,6 +384,8 @@ final class ServerController {
             terminalsBySession[sessionId]?.screenDidChange()
         case let .metadataChanged(sessionId):
             terminalsBySession[sessionId]?.metadataDidChange()
+        case let .titleChanged(sessionId, title):
+            terminalsBySession[sessionId]?.retitle(title)
         case let .sessionEnded(sessionId):
             sessionDidEnd(sessionId)
         case .catalogChanged:
@@ -284,7 +396,9 @@ final class ServerController {
             sessionsRefresh.request { [weak self] in await self?.loadSessions() }
         case let .filesChanged(projectId, paths):
             fileWatches.deliver(paths, in: projectId)
-        case .activityChanged, .gitChanged:
+        case .activityChanged:
+            reloadActivity()
+        case .gitChanged:
             break
         case .serverRestarting:
             restartPending = true
@@ -319,9 +433,14 @@ final class ServerController {
         let closing = connection
         connection = nil
         attachment.connectionDidClose()
+        pushRegistrar.connectionDidClose()
+        supportsPushNotifications = false
         projectModels.values.flatMap(\.tabs).forEach { $0.connectionDidClose() }
         projectsRefresh.cancel()
         sessionsRefresh.cancel()
+        activityRefresh.cancel()
+        sessionActivity = [:]
+        pendingEventIDs = [:]
         closing?.disconnect()
         if closing != nil {
             announceConnection(false)
@@ -362,24 +481,63 @@ final class ServerController {
     private func refreshEverything() {
         projectsRefresh.request { [weak self] in await self?.loadProjects() }
         sessionsRefresh.request { [weak self] in await self?.loadSessions() }
+        reloadActivity()
+    }
+
+    private func reloadActivity() {
+        guard connection != nil else { return }
+        activityRefresh.request { [weak self] in await self?.loadActivity() }
+    }
+
+    private func loadActivity() async {
+        guard let connection else { return }
+        let current = generation
+        do {
+            let activity = try await connection.activity()
+            guard current == generation, !Task.isCancelled else { return }
+            pendingEventIDs = Dictionary(grouping: activity.events, by: \.sessionId).mapValues { $0.map(\.id) }
+            sessionActivity = TabActivity.bySession(activity)
+            if let visible = projectModels.values.first(where: \.isVisible)?.selectedTab?.sessionID {
+                acknowledgeActivity(forSession: visible)
+            }
+        } catch {
+            guard current == generation, !Task.isCancelled else { return }
+            Log.connection.error("Loading activity failed: \(String(describing: ServerFailure(error)), privacy: .public)")
+        }
     }
 
     private func loadProjects() async {
         guard let connection else { return }
+        let current = generation
         do {
-            projects = try await connection.projects()
+            let listed = try await connection.projects()
+            guard current == generation, !Task.isCancelled else { return }
+            projects = listed
             hasLoadedProjects = true
             projectsLoadFailed = false
             dropRemovedProjects()
+            if isBrowsing {
+                prepareListedProjects()
+            }
         } catch {
+            guard current == generation, !Task.isCancelled else { return }
             projectsLoadFailed = true
             Log.connection.error("Loading projects failed: \(String(describing: ServerFailure(error)), privacy: .public)")
         }
     }
 
+    private func prepareListedProjects() {
+        for project in projects {
+            _ = projectModel(for: project.id)
+        }
+        guard connection != nil else { return }
+        sessionsRefresh.request { [weak self] in await self?.loadSessions() }
+    }
+
     private func loadSessions() async {
         guard let connection else { return }
         for model in projectModels.values where model.needsSessions {
+            guard !Task.isCancelled, self.connection === connection else { return }
             await model.refreshSessions(using: connection)
         }
     }

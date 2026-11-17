@@ -18,6 +18,7 @@ import com.muxy.app.features.billing.BillingRepository
 import com.muxy.app.features.billing.GooglePlayBilling
 import com.muxy.app.features.billing.SecretTrialStore
 import com.muxy.app.features.connections.ConnectionsListViewModel
+import com.muxy.app.features.demo.DemoBackend
 import com.muxy.app.features.demo.syncDemoMode
 import com.muxy.app.features.editconnection.ConnectionEditor
 import com.muxy.app.features.editconnection.EditConnectionViewModel
@@ -28,12 +29,20 @@ import com.muxy.app.features.navigation.RootViewModel
 import com.muxy.app.features.projectdetail.ProjectDetailViewModel
 import com.muxy.app.features.projectdetail.ProjectToolsFactory
 import com.muxy.app.features.projects.ProjectsViewModel
+import com.muxy.app.features.push.DataStorePushStateStore
+import com.muxy.app.features.push.FirebasePushTokenSource
+import com.muxy.app.features.push.PushCenter
+import com.muxy.app.features.push.PushNotifier
+import com.muxy.app.features.push.SecretPushKeyStore
+import com.muxy.app.features.push.SystemNotificationPermission
 import com.muxy.app.features.server.RemoteServerConnectionProvider
 import com.muxy.app.features.server.ServerDirectory
 import com.muxy.app.features.server.ServerProjectViewModel
 import com.muxy.app.features.server.ServerProjectsViewModel
 import com.muxy.app.features.settings.SettingsViewModel
 import com.muxy.app.features.sshterminal.SshTerminalViewModel
+import com.muxy.app.features.tabs.TabsCatalog
+import com.muxy.app.features.tabs.TabsHomeViewModel
 import com.muxy.app.features.terminal.SystemTerminalClipboard
 import com.muxy.app.networking.muxy1.ConnectionLifecycle
 import com.muxy.app.networking.muxy1.ConnectionManager
@@ -141,20 +150,39 @@ class AppContainer(
     private val terminalClipboard = SystemTerminalClipboard(context)
 
     private val phoneName = SystemPhoneName(context)
+    private val demoBackend = DemoBackend()
 
-    val connectionManager =
-        ConnectionManager(
-            makeTransport = { url -> WebSocketTransport(url, httpClient) },
-            tokenStore = tokenStore,
-            phoneName = phoneName,
-        )
+    val connectionManager = makeDeviceConnectionManager()
 
     val connectionLifecycle = ConnectionLifecycle(connectionManager, connectionStore, mainScope)
 
+    val pushNotifier = PushNotifier(context)
+
+    val push =
+        PushCenter(
+            store =
+                DataStorePushStateStore(
+                    preferencesDataStore("Notifications", ioScope) { context.preferencesDataStoreFile(PUSH_FILE) },
+                    ioScope,
+                ),
+            keys = SecretPushKeyStore(secretStore),
+            connections = connectionStore,
+            permission = SystemNotificationPermission(context),
+            tokens = FirebasePushTokenSource(),
+            notifications = pushNotifier,
+            scope = mainScope,
+        )
+
     val serverDirectory =
-        ServerDirectory(credentialStore, SdkServerConnector(), mainScope) { connectionId ->
-            RemoteServerConnectionProvider(connectionId, connectionStore, remoteConnector)
-        }
+        ServerDirectory(
+            credentialStore,
+            SdkServerConnector(),
+            mainScope,
+            remoteProvider = { connectionId -> RemoteServerConnectionProvider(connectionId, connectionStore, remoteConnector) },
+            push = push,
+        )
+
+    val tabsCatalog = TabsCatalog(connectionStore, billing, serverDirectory, ::makeDeviceConnectionManager, mainScope)
 
     val projectTools =
         ProjectToolsFactory(
@@ -181,17 +209,23 @@ class AppContainer(
             lifecycle.addObserver(connectionLifecycle)
             lifecycle.addObserver(serverDirectory)
             lifecycle.addObserver(billingLifecycle)
+            lifecycle.addObserver(tabsCatalog)
+            push.contextDidChange = serverDirectory::pushContextDidChange
+            push.isConnectedInForeground = serverDirectory::isConnected
+            push.start()
             ioScope.syncDemoMode(settingsStore.settings, connectionStore, tokenStore)
             mutableReady.value = true
         }
     }
 
-    fun makeRootViewModel(): RootViewModel = RootViewModel(settingsStore, addConnectionRequests, ready)
+    fun makeRootViewModel(): RootViewModel = RootViewModel(settingsStore, addConnectionRequests, push, ready)
 
-    fun makeSettingsViewModel(): SettingsViewModel = SettingsViewModel(settingsStore)
+    fun makeSettingsViewModel(): SettingsViewModel = SettingsViewModel(settingsStore, push)
 
     fun makeConnectionsListViewModel(): ConnectionsListViewModel =
         ConnectionsListViewModel(connectionStore, tokenStore, credentialStore, serverDirectory)
+
+    fun makeTabsHomeViewModel(): TabsHomeViewModel = TabsHomeViewModel(tabsCatalog, push, serverDirectory.supportsPushNotifications)
 
     fun makeEditConnectionViewModel(connectionId: UUID): EditConnectionViewModel =
         EditConnectionViewModel(
@@ -246,18 +280,36 @@ class AppContainer(
             settingsStore = settingsStore,
             outbound = mainScope,
             clipboard = terminalClipboard,
+            initialTabId = route.initialTabId,
         )
 
     fun makeServerProjectsViewModel(route: AppRoute.ServerProjects): ServerProjectsViewModel =
         ServerProjectsViewModel(route.connectionId, serverDirectory.controller(route.serverId), connectionStore)
 
     fun makeServerProjectViewModel(route: AppRoute.ServerProject): ServerProjectViewModel =
+        makeServerProjectViewModel(route.connectionId, route.serverId, route.projectId, route.initialTabId)
+
+    fun makeServerProjectViewModel(
+        connectionId: UUID,
+        serverId: String,
+        projectId: String,
+        initialTabId: UUID?,
+    ): ServerProjectViewModel =
         ServerProjectViewModel(
-            connectionId = route.connectionId,
-            projectId = route.projectId,
-            server = serverDirectory.controller(route.serverId),
+            connectionId = connectionId,
+            projectId = projectId,
+            server = serverDirectory.controller(serverId),
             connectionStore = connectionStore,
             settingsStore = settingsStore,
+            initialTabId = initialTabId,
+        )
+
+    private fun makeDeviceConnectionManager(): ConnectionManager =
+        ConnectionManager(
+            makeTransport = { url -> WebSocketTransport(url, httpClient) },
+            tokenStore = tokenStore,
+            phoneName = phoneName,
+            demoBackend = demoBackend,
         )
 
     private companion object {
@@ -265,6 +317,7 @@ class AppContainer(
         const val CONNECTIONS_FILE = "connections"
         const val WORKSPACES_FILE = "workspace_selections"
         const val WORKTREES_FILE = "worktrees"
+        const val PUSH_FILE = "notifications"
         const val SECRETS_FILE = "secrets.preferences_pb"
         const val HANDSHAKE_TIMEOUT_SECONDS = 8L
     }

@@ -1,6 +1,9 @@
 included:
   - Muxy
   - MuxyTests
+  - MuxyStoreScreenshots
+  - MuxyNotificationService
+  - MuxyPush/Sources
 
 excluded:
   - .build

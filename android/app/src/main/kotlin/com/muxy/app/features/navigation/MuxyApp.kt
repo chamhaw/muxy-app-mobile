@@ -1,9 +1,15 @@
 package com.muxy.app.features.navigation
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSerializable
 import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -18,11 +24,12 @@ import com.muxy.app.app.AppContainer
 import com.muxy.app.design.MuxyTheme
 import com.muxy.app.design.ThemeCatalog
 import com.muxy.app.design.ThemedWindow
+import com.muxy.app.design.components.currentWindowWidth
+import com.muxy.app.design.components.rememberSidebarState
 import com.muxy.app.features.addconnection.AddConnectionRequest
 import com.muxy.app.features.addconnection.AddConnectionScreen
 import com.muxy.app.features.billing.EntitlementFooter
 import com.muxy.app.features.billing.PaywallScreen
-import com.muxy.app.features.connections.ConnectionsListScreen
 import com.muxy.app.features.editconnection.EditConnectionScreen
 import com.muxy.app.features.files.FilesModal
 import com.muxy.app.features.git.GitModal
@@ -33,10 +40,14 @@ import com.muxy.app.features.projectdetail.ToolProject
 import com.muxy.app.features.projects.ProjectsScreen
 import com.muxy.app.features.server.ServerProjectScreen
 import com.muxy.app.features.server.ServerProjectsScreen
+import com.muxy.app.features.server.ServerSessionScreen
 import com.muxy.app.features.settings.SettingsModal
 import com.muxy.app.features.sshterminal.SshTerminalScreen
+import com.muxy.app.features.tabs.TabsHomeScreen
 import com.muxy.app.models.Connection
+import com.muxy.app.models.ConnectionKind
 import com.muxy.app.networking.muxy1.ConnectionFocus
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
 
 @Composable
@@ -73,7 +84,12 @@ private fun AppNavigation(
     container: AppContainer,
     backStack: NavBackStack<AppRoute>,
 ) {
-    ConnectionFocusBridge(container, backStack)
+    val windowWidth = currentWindowWidth()
+    val sidebar = rememberSidebarState()
+    val sceneStrategies =
+        remember(windowWidth, sidebar) { listOf(ModalSceneStrategy(windowWidth), SidebarSceneStrategy(windowWidth, sidebar)) }
+    ConnectionFocusBridge(container, backStack, isSidebarShown = windowWidth.isWide && sidebar.isVisible)
+    PushBridge(container, backStack)
     LaunchedEffect(backStack) {
         pendingPairingRequests(
             container.addConnectionRequests.request,
@@ -85,7 +101,12 @@ private fun AppNavigation(
         }
     }
     val openConnection = { connection: Connection ->
-        backStack.openConnection(connection, container.billing.enforcement, container.billing.refreshEntitlement())
+        backStack.openConnection(
+            connection,
+            container.billing.enforcement,
+            container.billing.refreshEntitlement(),
+            inPane = windowWidth.isWide,
+        )
     }
     NavDisplay(
         backStack = backStack,
@@ -98,54 +119,68 @@ private fun AppNavigation(
                 rememberSaveableStateHolderNavEntryDecorator(),
                 rememberViewModelStoreNavEntryDecorator(),
             ),
+        sceneStrategies = sceneStrategies,
         transitionSpec = { NavigationTransitions.push() },
         popTransitionSpec = { NavigationTransitions.pop() },
         predictivePopTransitionSpec = { NavigationTransitions.pop() },
         entryProvider =
             entryProvider {
-                entry<AppRoute.Connections> {
-                    ConnectionsListScreen(
-                        viewModel = viewModel { container.makeConnectionsListViewModel() },
-                        onSelect = openConnection,
-                        onAddConnection = { backStack.open(AppRoute.AddConnection) },
+                entry<AppRoute.Connections>(metadata = SidebarSceneStrategy.sidebar()) {
+                    val connections = viewModel { container.makeConnectionsListViewModel() }
+                    TabsHomeScreen(
+                        viewModel = viewModel { container.makeTabsHomeViewModel() },
+                        onSelect = {
+                            backStack.openTab(
+                                it,
+                                container.billing.enforcement,
+                                container.billing.refreshEntitlement(),
+                                inPane = windowWidth.isWide,
+                            )
+                        },
+                        onOpenConnection = openConnection,
+                        onAddDevice = { backStack.open(AppRoute.AddConnection) },
                         onSettings = { backStack.open(AppRoute.Settings) },
                         onEdit = { backStack.open(AppRoute.EditConnection(it.id)) },
+                        onDelete = connections::delete,
+                        onUnlock = { backStack.open(AppRoute.Paywall) },
                         footer = { EntitlementFooter(container.billing) },
                     )
                 }
-                entry<AppRoute.Paywall>(metadata = NavigationTransitions.modal) {
+                entry<AppRoute.Paywall>(metadata = ModalSceneStrategy.form()) {
                     PaywallScreen(container.billing, onClose = { backStack.close(AppRoute.Paywall) })
                 }
-                entry<AppRoute.Settings>(metadata = NavigationTransitions.modal) {
+                entry<AppRoute.Settings>(metadata = ModalSceneStrategy.form()) {
                     SettingsModal(
                         viewModel = viewModel { container.makeSettingsViewModel() },
                         onClose = { backStack.close(AppRoute.Settings) },
                     )
                 }
-                entry<AppRoute.AddConnection>(metadata = NavigationTransitions.modal) {
+                entry<AppRoute.AddConnection>(metadata = ModalSceneStrategy.form()) {
                     AddConnectionScreen(
                         viewModel = viewModel { container.makeAddConnectionViewModel() },
                         onCancel = { backStack.close(AppRoute.AddConnection) },
                         onAdded = { connection ->
                             connection.serverRouteId?.let(container.serverDirectory::credentialDidChange)
-                            backStack.close(AppRoute.AddConnection)
-                            openConnection(connection)
+                            backStack.open(AppRoute.Connections)
+                            if (connection.kind == ConnectionKind.SERVER && !connection.isRemoteServer) {
+                                container.push.requestPermissionIfUndetermined()
+                            }
                         },
                     )
                 }
-                entry<AppRoute.EditConnection>(metadata = NavigationTransitions.modal) { route ->
+                entry<AppRoute.EditConnection>(metadata = ModalSceneStrategy.form()) { route ->
                     EditConnectionScreen(
                         viewModel = viewModel { container.makeEditConnectionViewModel(route.connectionId) },
                         onClose = { backStack.close(route) },
                     )
                 }
-                entry<AppRoute.SshTerminal> { route ->
+                entry<AppRoute.SshTerminal>(metadata = SidebarSceneStrategy.pane()) { route ->
                     SshTerminalScreen(
                         viewModel = viewModel { container.makeSshTerminalViewModel(route.connectionId) },
                         onBack = { backStack.close(route) },
                     )
                 }
-                entry<AppRoute.Projects> { route ->
+                entry<AppRoute.Projects>(metadata = SidebarSceneStrategy.pane()) { route ->
                     ProjectsScreen(
                         viewModel = viewModel { container.makeProjectsViewModel(route.connectionId) },
                         onSelect = { project -> backStack.open(AppRoute.ProjectDetail(route.connectionId, project.id, project.name)) },
@@ -153,9 +188,13 @@ private fun AppNavigation(
                         onBack = { backStack.close(route) },
                     )
                 }
-                entry<AppRoute.ProjectDetail> { route ->
+                entry<AppRoute.ProjectDetail>(
+                    clazzContentKey = { it.destination.toString() },
+                    metadata = SidebarSceneStrategy.pane(),
+                ) { route ->
                     ProjectDetailScreen(
                         viewModel = viewModel { container.makeProjectDetailViewModel(route) },
+                        requestedTabId = route.initialTabId,
                         onBack = { backStack.close(route) },
                         onTool = { tool ->
                             backStack.open(
@@ -164,16 +203,20 @@ private fun AppNavigation(
                         },
                     )
                 }
-                entry<AppRoute.ServerProjects> { route ->
+                entry<AppRoute.ServerProjects>(metadata = SidebarSceneStrategy.pane()) { route ->
                     ServerProjectsScreen(
                         viewModel = viewModel { container.makeServerProjectsViewModel(route) },
                         onSelect = { projectId -> backStack.open(AppRoute.ServerProject(route.connectionId, route.serverId, projectId)) },
                         onBack = { backStack.close(route) },
                     )
                 }
-                entry<AppRoute.ServerProject> { route ->
+                entry<AppRoute.ServerProject>(
+                    clazzContentKey = { it.destination.toString() },
+                    metadata = SidebarSceneStrategy.pane(),
+                ) { route ->
                     ServerProjectScreen(
                         viewModel = viewModel { container.makeServerProjectViewModel(route) },
+                        requestedTabId = route.initialTabId,
                         onBack = { backStack.close(route) },
                         onTool = { tool ->
                             backStack.open(
@@ -182,7 +225,30 @@ private fun AppNavigation(
                         },
                     )
                 }
-                entry<AppRoute.ProjectTools>(metadata = NavigationTransitions.modal) { route ->
+                entry<AppRoute.ServerSession>(
+                    clazzContentKey = { it.toString() },
+                    metadata = SidebarSceneStrategy.pane(),
+                ) { route ->
+                    ServerSessionScreen(
+                        target = route.target,
+                        server = container.serverDirectory.controller(route.serverId),
+                    ) { projectId, tabId ->
+                        ServerProjectScreen(
+                            viewModel =
+                                viewModel(key = "server-project:$projectId") {
+                                    container.makeServerProjectViewModel(route.connectionId, route.serverId, projectId, tabId)
+                                },
+                            requestedTabId = tabId,
+                            onBack = { backStack.close(route) },
+                            onTool = { tool ->
+                                backStack.open(
+                                    AppRoute.ProjectTools(ToolProject.Server(route.connectionId, route.serverId, projectId), tool),
+                                )
+                            },
+                        )
+                    }
+                }
+                entry<AppRoute.ProjectTools>(metadata = ModalSceneStrategy.page()) { route ->
                     if (route.tool == ProjectTool.FILES) {
                         FilesModal(
                             viewModel = viewModel { container.projectTools.files(route.project) },
@@ -209,17 +275,50 @@ private fun AppNavigation(
 }
 
 @Composable
-private fun ConnectionFocusBridge(
+private fun PushBridge(
     container: AppContainer,
     backStack: NavBackStack<AppRoute>,
 ) {
-    LaunchedEffect(backStack) {
-        snapshotFlow { backStack.toList().connectionFocus() }.collect(container.connectionLifecycle::focus)
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { container.push.onPermissionResult() }
+    LaunchedEffect(container) {
+        container.push.permissionRequests.collect {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
     LaunchedEffect(backStack) {
-        snapshotFlow { backStack.toList().serverFocus() }.collect(container.serverDirectory::focus)
+        container.push.openRequest.filterNotNull().collect { request ->
+            container.push.take(request)
+            backStack.openPush(
+                request,
+                container.connectionStore.load(),
+                container.billing.enforcement,
+                container.billing.refreshEntitlement(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionFocusBridge(
+    container: AppContainer,
+    backStack: NavBackStack<AppRoute>,
+    isSidebarShown: Boolean,
+) {
+    val sidebarShown by rememberUpdatedState(isSidebarShown)
+    LaunchedEffect(backStack) {
+        snapshotFlow { backStack.toList() to sidebarShown }.collect { (routes, sidebarShown) ->
+            val isHome = sidebarShown || routes.lastOrNull() == AppRoute.Connections
+            container.connectionLifecycle.focus(routes.connectionFocus())
+            if (isHome) container.tabsCatalog.setVisible(true)
+            container.serverDirectory.focus(routes.serverFocus())
+            if (!isHome) container.tabsCatalog.setVisible(false)
+        }
     }
     DisposableEffect(container) {
-        onDispose { container.connectionLifecycle.focus(ConnectionFocus.Hold) }
+        onDispose {
+            container.tabsCatalog.setVisible(false)
+            container.connectionLifecycle.focus(ConnectionFocus.Hold)
+        }
     }
 }

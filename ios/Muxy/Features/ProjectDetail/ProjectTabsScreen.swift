@@ -6,7 +6,7 @@ nonisolated enum ProjectTabsStatus: Equatable, Sendable {
     case disconnected
 }
 
-struct ProjectTabsScreen<Item: TabStripItem, Page: View>: View {
+struct ProjectTabsScreen<Item: TabStripItem, Page: View>: View where Item.ID == UUID {
     let title: String
     let connectionName: String
     let tabs: [Item]
@@ -18,6 +18,7 @@ struct ProjectTabsScreen<Item: TabStripItem, Page: View>: View {
     @ViewBuilder let page: (Item) -> Page
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.activeTabReporter) private var activeTabReporter
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,9 +35,23 @@ struct ProjectTabsScreen<Item: TabStripItem, Page: View>: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.groupedBackground)
+        .tabPageChrome(theme)
         .ignoresSafeArea(.keyboard)
         .screenTitle(title)
+        .onChange(of: selectedTabID, initial: true) { previous, current in
+            report(previous: previous, current: current)
+        }
+        .onDisappear {
+            selectedTabID.map(activeTabReporter.clear)
+        }
+    }
+
+    private func report(previous: UUID?, current: UUID?) {
+        if let current {
+            activeTabReporter.select(current)
+            return
+        }
+        previous.map(activeTabReporter.clear)
     }
 
     @ViewBuilder
@@ -52,11 +67,11 @@ struct ProjectTabsScreen<Item: TabStripItem, Page: View>: View {
         TabView(selection: selectionBinding) {
             ForEach(tabs) { tab in
                 page(tab)
+                    .tabPage(isActive: tab.id == selectedTabID)
                     .tag(Optional(tab.id))
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .background(theme.groupedBackground.ignoresSafeArea())
     }
 
     @ViewBuilder
